@@ -83,6 +83,16 @@ type ChannelScoringProvider interface {
 	ScoreWithClient(context.Context, string, *http.Client) (float64, error)
 }
 
+type SurfingIsolationStatus struct {
+	Mode     string
+	Verified bool
+	Reason   string
+}
+
+type SurfingIsolationGuard interface {
+	Check(context.Context) (SurfingIsolationStatus, error)
+}
+
 type UpstreamRequest struct {
 	Location  string
 	UserAgent string
@@ -110,6 +120,7 @@ type Dependencies struct {
 	ScoringProviders map[string]ScoringProvider
 	Kernel           Kernel
 	TestChannel      TestChannel
+	Isolation        SurfingIsolationGuard
 }
 
 type Config struct {

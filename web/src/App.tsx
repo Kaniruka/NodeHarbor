@@ -37,6 +37,7 @@ const messages = {
     running: "运行中",
     completed: "已完成",
     failed: "失败",
+    paused: "已暂停",
     idle: "尚未运行",
     summary: (passed: number, total: number) => `${passed} / ${total} 个节点通过`,
     provider: "评分源",
@@ -71,6 +72,7 @@ const messages = {
     running: "Running",
     completed: "Completed",
     failed: "Failed",
+    paused: "Paused",
     idle: "Not run yet",
     summary: (passed: number, total: number) => `${passed} / ${total} Proxy Nodes passed`,
     provider: "Scoring Provider",
@@ -199,7 +201,7 @@ export default function App() {
 }
 
 type EvaluationText = typeof messages[Locale];
-type EvaluationState = { status: "idle" | "running" | "completed" | "failed"; total: number; passed: number; failed: number; results: Array<{ name: string; state: string; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
+type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; results: Array<{ name: string; state: string; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
 
 function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
   const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
@@ -228,6 +230,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
     <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} onChange={(event) => setProvider(event.target.value as "iplark" | "ipcheck")}><option value="iplark">{text.iplark}</option><option value="ipcheck">{text.ipcheck}</option></select></label><label><span>{text.threshold}</span><input type="number" min="0" max="100" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label></div>
+    {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
     {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
 }

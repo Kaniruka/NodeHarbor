@@ -24,7 +24,14 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipcheck": ipcheck},
 		Kernel:           kernel,
 		TestChannel:      UnavailableTestChannel{},
+		Isolation:        UnavailableSurfingIsolation{},
 	}
+}
+
+type UnavailableSurfingIsolation struct{}
+
+func (UnavailableSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
+	return SurfingIsolationStatus{Mode: "unknown", Reason: "Surfing isolation status is unavailable"}, nil
 }
 
 type UnavailableUpstream struct{}

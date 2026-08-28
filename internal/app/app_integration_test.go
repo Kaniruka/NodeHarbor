@@ -292,6 +292,29 @@ func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
 	}
 }
 
+func TestSurfingTUNPausesEvaluationBeforeProbe(t *testing.T) {
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}
+	server := openGuardedEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, surfingGuard{status: app.SurfingIsolationStatus{Mode: "tun", Reason: "Surfing TUN is active"}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Guarded", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "paused" || run.Reason != "Surfing TUN is active" || channel.calls != 0 {
+		t.Fatalf("run=%+v calls=%d", run, channel.calls)
+	}
+}
+
 func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel app.Kernel) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
@@ -309,6 +332,19 @@ func openEvaluationApplication(t *testing.T, upstream app.Upstream, kernel app.K
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
 	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: &recordingScoring{score: 80}, Kernel: kernel, TestChannel: channel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { _ = instance.Close() })
+	return server
+}
+
+func openGuardedEvaluationApplication(t *testing.T, upstream app.Upstream, kernel app.Kernel, channel app.TestChannel, guard app.SurfingIsolationGuard) *httptest.Server {
+	t.Helper()
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: &recordingScoring{score: 80}, Kernel: kernel, TestChannel: channel, Isolation: guard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +468,12 @@ type availabilityChannel struct {
 	latencies []time.Duration
 	calls     int
 	outcome   string
+}
+
+type surfingGuard struct{ status app.SurfingIsolationStatus }
+
+func (guard surfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {
+	return guard.status, nil
 }
 
 func (channel *availabilityChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
