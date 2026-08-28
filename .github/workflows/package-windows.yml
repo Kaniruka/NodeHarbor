@@ -1,0 +1,25 @@
+name: package-windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build package
+        shell: pwsh
+        run: .\scripts\package-windows.ps1 -Version $env:GITHUB_SHA
+      - name: Smoke test package
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath "dist\NodeHarbor-windows-$env:GITHUB_SHA.zip" -DestinationPath "$env:RUNNER_TEMP\nodeharbor"
+          .\scripts\smoke-windows.ps1 -PackageDirectory "$env:RUNNER_TEMP\nodeharbor"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: NodeHarbor-windows
+          path: dist/*.zip
