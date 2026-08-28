@@ -13,15 +13,15 @@ type UpstreamSubscription = {
   lastSuccessfulDocument?: string;
   proxyNodeCount: number;
   enabled: boolean;
-  refreshStatus: "pending" | "success" | "failed";
+  refreshStatus: "pending" | "success" | "stale";
   lastError?: string;
 };
 
 const copy = {
   "zh-CN": {
     heading: "上游订阅",
-    hint: "导入、刷新并管理候选代理节点的来源",
-    count: (value: number) => `${value} / 10 个来源`,
+    hint: "导入、刷新并管理上游订阅",
+    count: (value: number) => `${value} / 10 个上游订阅`,
     url: "订阅 URL",
     upload: "上传文件",
     paste: "粘贴 YAML",
@@ -30,12 +30,12 @@ const copy = {
     userAgent: "User-Agent",
     file: "YAML 文件",
     yaml: "YAML 内容",
-    add: "添加来源",
+    add: "添加上游订阅",
     save: "保存更改",
     cancel: "取消编辑",
-    empty: "还没有上游订阅。选择一种方式添加第一个来源。",
+    empty: "还没有上游订阅。选择一种方式添加第一个上游订阅。",
     success: "刷新成功",
-    failed: "刷新失败",
+    stale: "已过期，使用上次成功内容",
     pending: "等待刷新",
     nodes: (value: number) => `${value} 个代理节点`,
     refresh: "刷新",
@@ -43,7 +43,7 @@ const copy = {
     disable: "禁用",
     enable: "启用",
     remove: "删除",
-    limit: "最多只能添加 10 个上游订阅。请先删除一个来源。",
+    limit: "最多只能添加 10 个上游订阅。请先删除一个上游订阅。",
     loadError: "无法读取上游订阅列表。",
     actionError: "操作失败，请重试。",
     defaultUserAgent: "留空时使用 Mihomo 兼容标识",
@@ -51,8 +51,8 @@ const copy = {
   },
   en: {
     heading: "Upstream Subscriptions",
-    hint: "Import, refresh, and manage sources of candidate Proxy Nodes",
-    count: (value: number) => `${value} / 10 sources`,
+    hint: "Import, refresh, and manage Upstream Subscriptions",
+    count: (value: number) => `${value} / 10 Upstream Subscriptions`,
     url: "Subscription URL",
     upload: "Upload file",
     paste: "Paste YAML",
@@ -61,12 +61,12 @@ const copy = {
     userAgent: "User-Agent",
     file: "YAML file",
     yaml: "YAML content",
-    add: "Add source",
+    add: "Add Upstream Subscription",
     save: "Save changes",
     cancel: "Cancel edit",
-    empty: "No Upstream Subscriptions yet. Choose an import method to add the first source.",
+    empty: "No Upstream Subscriptions yet. Choose an import method to add the first Upstream Subscription.",
     success: "Refresh successful",
-    failed: "Refresh failed",
+    stale: "Stale — using last successful content",
     pending: "Waiting to refresh",
     nodes: (value: number) => `${value} Proxy Nodes`,
     refresh: "Refresh",
@@ -74,7 +74,7 @@ const copy = {
     disable: "Disable",
     enable: "Enable",
     remove: "Delete",
-    limit: "At most 10 Upstream Subscriptions are allowed. Delete a source first.",
+    limit: "At most 10 Upstream Subscriptions are allowed. Delete an Upstream Subscription first.",
     loadError: "Upstream Subscriptions could not be loaded.",
     actionError: "The operation failed. Try again.",
     defaultUserAgent: "Leave blank to use a Mihomo-compatible identifier",
@@ -120,13 +120,7 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
     setError("");
     try {
       let response: Response;
-      if (editingID) {
-        response = await fetch(`/api/upstream-subscriptions/${editingID}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, url, userAgent, document }),
-        });
-      } else if (kind === "upload") {
+      if (kind === "upload") {
         if (!file) {
           setError(text.requiredFile);
           return;
@@ -134,7 +128,16 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
         const form = new FormData();
         form.set("name", name);
         form.set("file", file);
-        response = await fetch("/api/upstream-subscriptions", { method: "POST", body: form });
+        response = await fetch(editingID ? `/api/upstream-subscriptions/${editingID}` : "/api/upstream-subscriptions", {
+          method: editingID ? "PUT" : "POST",
+          body: form,
+        });
+      } else if (editingID) {
+        response = await fetch(`/api/upstream-subscriptions/${editingID}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, url, userAgent, document }),
+        });
       } else {
         response = await fetch("/api/upstream-subscriptions", {
           method: "POST",
@@ -143,7 +146,10 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
         });
       }
       const result = await readResult(response);
-      if (!response.ok) throw new Error(result.error || text.actionError);
+      if (!response.ok) {
+        if (editingID) await reload();
+        throw new Error(result.error || text.actionError);
+      }
       setSubscriptions((current) => editingID ? current.map((item) => item.id === result.id ? result : item) : [...current, result]);
       resetForm();
     } catch (failure) {
@@ -160,6 +166,7 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
     setURL(subscription.url || "");
     setUserAgent(subscription.userAgent || "");
     setDocument(subscription.configuredDocument || "");
+    setFile(null);
     setError("");
   }
 
@@ -252,13 +259,13 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
               </label>
             </>
           )}
-          {kind === "upload" && !editingID && (
+          {kind === "upload" && (
             <label className="wideField">
               <span>{text.file}</span>
               <input type="file" accept=".yaml,.yml,application/yaml,text/yaml,text/plain" onChange={(event) => setFile(event.target.files?.[0] || null)} disabled={atLimit} />
             </label>
           )}
-          {(kind === "paste" || (kind === "upload" && editingID)) && (
+          {kind === "paste" && (
             <label className="wideField">
               <span>{text.yaml}</span>
               <textarea value={document} onChange={(event) => setDocument(event.target.value)} rows={7} required disabled={atLimit} />

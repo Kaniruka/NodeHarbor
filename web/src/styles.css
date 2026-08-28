@@ -375,7 +375,7 @@ button:disabled {
 }
 
 .refreshState--success { color: #6ce5c6; background: rgba(30, 178, 143, 0.12); }
-.refreshState--failed { color: #ff9f91; background: rgba(209, 72, 62, 0.14); }
+.refreshState--stale { color: #ff9f91; background: rgba(209, 72, 62, 0.14); }
 
 .sourceURL {
   display: block;

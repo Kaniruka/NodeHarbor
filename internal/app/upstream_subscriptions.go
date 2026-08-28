@@ -16,29 +16,45 @@ import (
 
 const maximumUpstreamSubscriptions = 10
 
+type upstreamKind string
+
+const (
+	upstreamKindURL    upstreamKind = "url"
+	upstreamKindUpload upstreamKind = "upload"
+	upstreamKindPaste  upstreamKind = "paste"
+)
+
+type upstreamRefreshStatus string
+
+const (
+	upstreamRefreshPending upstreamRefreshStatus = "pending"
+	upstreamRefreshSuccess upstreamRefreshStatus = "success"
+	upstreamRefreshStale   upstreamRefreshStatus = "stale"
+)
+
 type upstreamSubscription struct {
-	ID                     string `json:"id"`
-	Name                   string `json:"name"`
-	Kind                   string `json:"kind"`
-	URL                    string `json:"url,omitempty"`
-	UserAgent              string `json:"userAgent,omitempty"`
-	ConfiguredDocument     string `json:"configuredDocument,omitempty"`
-	LastSuccessfulDocument string `json:"lastSuccessfulDocument,omitempty"`
-	ProxyNodeCount         int    `json:"proxyNodeCount"`
-	Enabled                bool   `json:"enabled"`
-	RefreshStatus          string `json:"refreshStatus"`
-	LastError              string `json:"lastError,omitempty"`
-	LastSuccessAt          string `json:"lastSuccessAt,omitempty"`
-	CreatedAt              string `json:"createdAt"`
-	UpdatedAt              string `json:"updatedAt"`
+	ID                     string                `json:"id"`
+	Name                   string                `json:"name"`
+	Kind                   upstreamKind          `json:"kind"`
+	URL                    string                `json:"url,omitempty"`
+	UserAgent              string                `json:"userAgent,omitempty"`
+	ConfiguredDocument     string                `json:"configuredDocument,omitempty"`
+	LastSuccessfulDocument string                `json:"lastSuccessfulDocument,omitempty"`
+	ProxyNodeCount         int                   `json:"proxyNodeCount"`
+	Enabled                bool                  `json:"enabled"`
+	RefreshStatus          upstreamRefreshStatus `json:"refreshStatus"`
+	LastError              string                `json:"lastError,omitempty"`
+	LastSuccessAt          string                `json:"lastSuccessAt,omitempty"`
+	CreatedAt              string                `json:"createdAt"`
+	UpdatedAt              string                `json:"updatedAt"`
 }
 
 type createUpstreamSubscriptionRequest struct {
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	URL       string `json:"url"`
-	UserAgent string `json:"userAgent"`
-	Document  string `json:"document"`
+	Name      string       `json:"name"`
+	Kind      upstreamKind `json:"kind"`
+	URL       string       `json:"url"`
+	UserAgent string       `json:"userAgent"`
+	Document  string       `json:"document"`
 }
 
 type updateUpstreamSubscriptionRequest struct {
@@ -106,7 +122,7 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 		writeError(response, http.StatusBadRequest, errors.New("Upstream Subscription name is required"))
 		return
 	}
-	if input.Kind != "url" && input.Kind != "paste" && input.Kind != "upload" {
+	if input.Kind != upstreamKindURL && input.Kind != upstreamKindPaste && input.Kind != upstreamKindUpload {
 		writeError(response, http.StatusBadRequest, errors.New("Upstream Subscription kind must be url, upload, or paste"))
 		return
 	}
@@ -122,7 +138,7 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 	var document []byte
 	var configuredDocument string
 	var acquisitionError error
-	if input.Kind == "url" {
+	if input.Kind == upstreamKindURL {
 		if input.URL == "" {
 			writeError(response, http.StatusBadRequest, errors.New("URL Upstream Subscription requires url"))
 			return
@@ -154,7 +170,7 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 	_, err = application.database.ExecContext(request.Context(), `INSERT INTO upstream_subscriptions(
 		id, name, kind, url, user_agent, configured_document, last_successful_document, proxy_node_count, enabled,
 		refresh_status, last_success_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'success', ?, ?, ?)`, id, input.Name, input.Kind, input.URL, input.UserAgent, configuredDocument, document, proxyNodeCount, now, now, now)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`, id, input.Name, input.Kind, input.URL, input.UserAgent, configuredDocument, document, proxyNodeCount, upstreamRefreshSuccess, now, now, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "at most 10 Upstream Subscriptions") {
 			writeError(response, http.StatusConflict, errors.New("at most 10 Upstream Subscriptions are allowed"))
@@ -177,34 +193,9 @@ func (application *Application) handleRefreshUpstreamSubscription(response http.
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	document, status, err := application.acquireUpstreamDocument(request.Context(), subscription)
+	updated, status, err := application.synchronizeUpstreamSubscription(request.Context(), subscription)
 	if err != nil {
-		if recordError := application.recordUpstreamRefreshFailure(request.Context(), subscription.ID, err); recordError != nil {
-			writeError(response, http.StatusInternalServerError, recordError)
-			return
-		}
 		writeError(response, status, err)
-		return
-	}
-	proxyNodeCount, err := application.validateUpstreamDocument(request.Context(), document)
-	if err != nil {
-		if recordError := application.recordUpstreamRefreshFailure(request.Context(), subscription.ID, err); recordError != nil {
-			writeError(response, http.StatusInternalServerError, recordError)
-			return
-		}
-		writeError(response, http.StatusUnprocessableEntity, err)
-		return
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := application.database.ExecContext(request.Context(), `UPDATE upstream_subscriptions SET
-		last_successful_document = ?, proxy_node_count = ?, refresh_status = 'success', last_error = '',
-		last_success_at = ?, updated_at = ? WHERE id = ?`, document, proxyNodeCount, now, now, subscription.ID); err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
-	}
-	updated, err := application.getUpstreamSubscription(request.Context(), subscription.ID)
-	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(response, http.StatusOK, updated)
@@ -216,14 +207,13 @@ func (application *Application) handleUpdateUpstreamSubscription(response http.R
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	var input updateUpstreamSubscriptionRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 10<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || input.Name == "" {
+	input, err := decodeUpdateUpstreamSubscriptionRequest(response, request)
+	if err != nil || input.Name == "" {
 		writeError(response, http.StatusBadRequest, errors.New("Upstream Subscription name is required"))
 		return
 	}
-	if subscription.Kind == "url" {
+	subscription.Name = input.Name
+	if subscription.Kind == upstreamKindURL {
 		if input.URL == "" {
 			writeError(response, http.StatusBadRequest, errors.New("URL Upstream Subscription requires url"))
 			return
@@ -237,37 +227,9 @@ func (application *Application) handleUpdateUpstreamSubscription(response http.R
 		}
 		subscription.ConfiguredDocument = input.Document
 	}
-	document, status, err := application.acquireUpstreamDocument(request.Context(), subscription)
+	updated, status, err := application.synchronizeUpstreamSubscription(request.Context(), subscription)
 	if err != nil {
-		if recordError := application.recordUpstreamRefreshFailure(request.Context(), subscription.ID, err); recordError != nil {
-			writeError(response, http.StatusInternalServerError, recordError)
-			return
-		}
 		writeError(response, status, err)
-		return
-	}
-	proxyNodeCount, err := application.validateUpstreamDocument(request.Context(), document)
-	if err != nil {
-		if recordError := application.recordUpstreamRefreshFailure(request.Context(), subscription.ID, err); recordError != nil {
-			writeError(response, http.StatusInternalServerError, recordError)
-			return
-		}
-		writeError(response, http.StatusUnprocessableEntity, err)
-		return
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = application.database.ExecContext(request.Context(), `UPDATE upstream_subscriptions SET
-		name = ?, url = ?, user_agent = ?, configured_document = ?, last_successful_document = ?,
-		proxy_node_count = ?, refresh_status = 'success', last_error = '', last_success_at = ?, updated_at = ?
-		WHERE id = ?`, input.Name, subscription.URL, subscription.UserAgent, subscription.ConfiguredDocument,
-		document, proxyNodeCount, now, now, subscription.ID)
-	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
-	}
-	updated, err := application.getUpstreamSubscription(request.Context(), subscription.ID)
-	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(response, http.StatusOK, updated)
@@ -317,7 +279,7 @@ func (application *Application) handleDeleteUpstreamSubscription(response http.R
 }
 
 func (application *Application) acquireUpstreamDocument(ctx context.Context, subscription upstreamSubscription) ([]byte, int, error) {
-	if subscription.Kind == "url" {
+	if subscription.Kind == upstreamKindURL {
 		document, err := application.dependencies.Upstream.Fetch(ctx, UpstreamRequest{Location: subscription.URL, UserAgent: subscription.UserAgent})
 		if err != nil {
 			return nil, http.StatusBadGateway, fmt.Errorf("fetch Upstream Subscription: %w", err)
@@ -327,35 +289,81 @@ func (application *Application) acquireUpstreamDocument(ctx context.Context, sub
 	return []byte(subscription.ConfiguredDocument), http.StatusOK, nil
 }
 
-func (application *Application) recordUpstreamRefreshFailure(ctx context.Context, id string, refreshError error) error {
-	_, err := application.database.ExecContext(ctx, `UPDATE upstream_subscriptions SET refresh_status = 'failed', last_error = ?, updated_at = ? WHERE id = ?`,
-		refreshError.Error(), time.Now().UTC().Format(time.RFC3339Nano), id)
-	return err
+func (application *Application) synchronizeUpstreamSubscription(ctx context.Context, subscription upstreamSubscription) (upstreamSubscription, int, error) {
+	document, status, err := application.acquireUpstreamDocument(ctx, subscription)
+	if err != nil {
+		return application.recordUpstreamRefreshFailure(ctx, subscription, status, err)
+	}
+	proxyNodeCount, err := application.validateUpstreamDocument(ctx, document)
+	if err != nil {
+		return application.recordUpstreamRefreshFailure(ctx, subscription, http.StatusUnprocessableEntity, err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = application.database.ExecContext(ctx, `UPDATE upstream_subscriptions SET
+		name = ?, url = ?, user_agent = ?, configured_document = ?, last_successful_document = ?,
+		proxy_node_count = ?, refresh_status = ?, last_error = '', last_success_at = ?, updated_at = ?
+		WHERE id = ?`, subscription.Name, subscription.URL, subscription.UserAgent, subscription.ConfiguredDocument,
+		document, proxyNodeCount, upstreamRefreshSuccess, now, now, subscription.ID)
+	if err != nil {
+		return upstreamSubscription{}, http.StatusInternalServerError, err
+	}
+	updated, err := application.getUpstreamSubscription(ctx, subscription.ID)
+	if err != nil {
+		return upstreamSubscription{}, http.StatusInternalServerError, err
+	}
+	return updated, http.StatusOK, nil
+}
+
+func (application *Application) recordUpstreamRefreshFailure(ctx context.Context, subscription upstreamSubscription, status int, refreshError error) (upstreamSubscription, int, error) {
+	_, err := application.database.ExecContext(ctx, `UPDATE upstream_subscriptions SET
+		name = ?, url = ?, user_agent = ?, configured_document = ?, refresh_status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		subscription.Name, subscription.URL, subscription.UserAgent, subscription.ConfiguredDocument, upstreamRefreshStale,
+		refreshError.Error(), time.Now().UTC().Format(time.RFC3339Nano), subscription.ID)
+	if err != nil {
+		return upstreamSubscription{}, http.StatusInternalServerError, err
+	}
+	return upstreamSubscription{}, status, refreshError
+}
+
+func decodeUpdateUpstreamSubscriptionRequest(response http.ResponseWriter, request *http.Request) (updateUpstreamSubscriptionRequest, error) {
+	if strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data") {
+		name, document, err := decodeUploadedUpstreamDocument(response, request)
+		return updateUpstreamSubscriptionRequest{Name: name, Document: document}, err
+	}
+	var input updateUpstreamSubscriptionRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 10<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return input, err
+	}
+	return input, nil
+}
+
+func decodeUploadedUpstreamDocument(response http.ResponseWriter, request *http.Request) (string, string, error) {
+	request.Body = http.MaxBytesReader(response, request.Body, 10<<20)
+	if err := request.ParseMultipartForm(10 << 20); err != nil {
+		return "", "", err
+	}
+	if request.MultipartForm != nil {
+		defer request.MultipartForm.RemoveAll()
+	}
+	file, _, err := request.FormFile("file")
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+	document, err := io.ReadAll(io.LimitReader(file, (10<<20)+1))
+	if err != nil || len(document) > 10<<20 {
+		return "", "", errors.New("uploaded Upstream Subscription is too large")
+	}
+	return request.FormValue("name"), string(document), nil
 }
 
 func decodeCreateUpstreamSubscriptionRequest(response http.ResponseWriter, request *http.Request) (createUpstreamSubscriptionRequest, error) {
 	var input createUpstreamSubscriptionRequest
 	if strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data") {
-		request.Body = http.MaxBytesReader(response, request.Body, 10<<20)
-		if err := request.ParseMultipartForm(10 << 20); err != nil {
-			return input, err
-		}
-		if request.MultipartForm != nil {
-			defer request.MultipartForm.RemoveAll()
-		}
-		file, _, err := request.FormFile("file")
-		if err != nil {
-			return input, err
-		}
-		defer file.Close()
-		document, err := io.ReadAll(io.LimitReader(file, (10<<20)+1))
-		if err != nil || len(document) > 10<<20 {
-			return input, errors.New("uploaded Upstream Subscription is too large")
-		}
-		input.Name = request.FormValue("name")
-		input.Kind = "upload"
-		input.Document = string(document)
-		return input, nil
+		name, document, err := decodeUploadedUpstreamDocument(response, request)
+		return createUpstreamSubscriptionRequest{Name: name, Kind: upstreamKindUpload, Document: document}, err
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 10<<20))
 	decoder.DisallowUnknownFields()

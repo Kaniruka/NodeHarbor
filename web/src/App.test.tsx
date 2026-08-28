@@ -79,7 +79,7 @@ test("user imports a pasted Upstream Subscription and sees it in the list", asyn
   await userEvent.click(screen.getByRole("button", { name: "粘贴 YAML" }));
   await userEvent.type(screen.getByLabelText("名称"), "测试来源");
   await userEvent.type(screen.getByLabelText("YAML 内容"), document);
-  await userEvent.click(screen.getByRole("button", { name: "添加来源" }));
+  await userEvent.click(screen.getByRole("button", { name: "添加上游订阅" }));
 
   expect(await screen.findByRole("heading", { name: "测试来源" })).toBeInTheDocument();
   expect(screen.getByText("1 个代理节点")).toBeInTheDocument();
@@ -88,6 +88,7 @@ test("user imports a pasted Upstream Subscription and sees it in the list", asyn
 
 test("user uploads a YAML file as an Upstream Subscription", async () => {
   const document = "proxies:\n  - name: uploaded\n    type: ss\n    server: upload.example\n    port: 443\n";
+  const replacement = "proxies:\n  - name: replacement\n    type: vless\n    server: replacement.example\n    port: 8443\n";
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json({ language: "zh-CN", installationId: "installation-1" });
@@ -99,6 +100,12 @@ test("user uploads a YAML file as an Upstream Subscription", async () => {
       expect((init.body as FormData).get("name")).toBe("上传来源");
       return Response.json({ id: "upload-1", name: "上传来源", kind: "upload", configuredDocument: document, lastSuccessfulDocument: document, proxyNodeCount: 1, enabled: true, refreshStatus: "success" }, { status: 201 });
     }
+    if (url.endsWith("/upload-1") && init?.method === "PUT") {
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).get("name")).toBe("更新上传");
+      expect((init.body as FormData).get("file")).toBeInstanceOf(File);
+      return Response.json({ id: "upload-1", name: "更新上传", kind: "upload", configuredDocument: replacement, lastSuccessfulDocument: replacement, proxyNodeCount: 1, enabled: true, refreshStatus: "success" });
+    }
     if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
     throw new Error(`unexpected request: ${url}`);
   });
@@ -107,8 +114,63 @@ test("user uploads a YAML file as an Upstream Subscription", async () => {
   await userEvent.click(screen.getByRole("button", { name: "上传文件" }));
   await userEvent.type(screen.getByLabelText("名称"), "上传来源");
   await userEvent.upload(screen.getByLabelText("YAML 文件"), new File([document], "subscription.yaml", { type: "application/yaml" }));
-  await userEvent.click(screen.getByRole("button", { name: "添加来源" }));
+  await userEvent.click(screen.getByRole("button", { name: "添加上游订阅" }));
   expect(await screen.findByRole("heading", { name: "上传来源" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "编辑" }));
+  await userEvent.clear(screen.getByLabelText("名称"));
+  await userEvent.type(screen.getByLabelText("名称"), "更新上传");
+  await userEvent.upload(screen.getByLabelText("YAML 文件"), new File([replacement], "replacement.yaml", { type: "application/yaml" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存更改" }));
+  expect(await screen.findByRole("heading", { name: "更新上传" })).toBeInTheDocument();
+});
+
+test("user imports a credential-bearing URL with a custom User-Agent", async () => {
+  const fullURL = "https://user:secret@example.test/sub?token=visible";
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json({ language: "zh-CN", installationId: "installation-1" });
+    if (url.endsWith("/api/health")) return Response.json({
+      status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" },
+    });
+    if (url.endsWith("/api/upstream-subscriptions") && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toEqual({ name: "URL 订阅", kind: "url", url: fullURL, userAgent: "Clash.Meta/1.19" });
+      return Response.json({ id: "url-1", name: "URL 订阅", kind: "url", url: fullURL, userAgent: "Clash.Meta/1.19", proxyNodeCount: 1, enabled: true, refreshStatus: "success" }, { status: 201 });
+    }
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />);
+  await screen.findByRole("heading", { name: "上游订阅" });
+  await userEvent.type(screen.getByLabelText("名称"), "URL 订阅");
+  await userEvent.type(screen.getByLabelText("完整 URL"), fullURL);
+  await userEvent.type(screen.getByLabelText("User-Agent"), "Clash.Meta/1.19");
+  await userEvent.click(screen.getByRole("button", { name: "添加上游订阅" }));
+  expect(await screen.findByText(fullURL)).toBeInTheDocument();
+});
+
+test("failed refresh shows a stale Upstream Subscription and its reason", async () => {
+  let refreshAttempted = false;
+  const subscription = { id: "stale-1", name: "Stale", kind: "url", url: "https://example.test/sub", proxyNodeCount: 1, enabled: true, refreshStatus: "success" };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json({ language: "zh-CN", installationId: "installation-1" });
+    if (url.endsWith("/api/health")) return Response.json({
+      status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" },
+    });
+    if (url.endsWith("/stale-1/refresh") && init?.method === "POST") {
+      refreshAttempted = true;
+      return Response.json({ error: "connection timed out" }, { status: 502 });
+    }
+    if (url.endsWith("/api/upstream-subscriptions")) {
+      return Response.json([refreshAttempted ? { ...subscription, refreshStatus: "stale", lastError: "fetch Upstream Subscription: connection timed out" } : subscription]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />);
+  await screen.findByRole("heading", { name: "Stale" });
+  await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+  expect(await screen.findByText("已过期，使用上次成功内容")).toBeInTheDocument();
+  expect(screen.getByText("fetch Upstream Subscription: connection timed out")).toBeInTheDocument();
 });
 
 test("WebUI blocks an eleventh Upstream Subscription with a clear message", async () => {
@@ -132,8 +194,8 @@ test("WebUI blocks an eleventh Upstream Subscription with a clear message", asyn
     throw new Error(`unexpected request: ${url}`);
   });
   render(<App />);
-  expect(await screen.findByText("最多只能添加 10 个上游订阅。请先删除一个来源。")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "添加来源" })).toBeDisabled();
+  expect(await screen.findByText("最多只能添加 10 个上游订阅。请先删除一个上游订阅。")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "添加上游订阅" })).toBeDisabled();
 });
 
 test("user edits, disables, and deletes an Upstream Subscription", async () => {

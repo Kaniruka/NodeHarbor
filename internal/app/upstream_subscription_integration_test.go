@@ -172,7 +172,7 @@ func TestFailedURLRefreshPreservesLastSuccessfulDocumentAndRecordsReason(t *test
 	}
 	getJSON(t, server.URL+"/api/upstream-subscriptions", &subscriptions)
 	got := subscriptions[0]
-	if got.LastSuccessfulDocument != string(firstDocument) || got.RefreshStatus != "failed" || !strings.Contains(got.LastError, "connection timed out") {
+	if got.LastSuccessfulDocument != string(firstDocument) || got.RefreshStatus != "stale" || !strings.Contains(got.LastError, "connection timed out") {
 		t.Fatalf("source after failed refresh = %+v", got)
 	}
 }
@@ -255,6 +255,78 @@ func TestUserEditsPastedUpstreamSubscriptionThroughHTTP(t *testing.T) {
 	}
 	if edited.Name != "After" || edited.ConfiguredDocument != afterDocument || edited.LastSuccessfulDocument != afterDocument {
 		t.Fatalf("edited source = %+v", edited)
+	}
+}
+
+func TestUserEditsUploadedUpstreamSubscriptionWithAnotherFile(t *testing.T) {
+	server := openApplicationServer(t, &configuredUpstream{})
+	before := []byte("proxies:\n  - name: before-upload\n    type: ss\n    server: before.example\n    port: 443\n")
+	createdResponse := postMultipartUpstreamSubscription(t, http.MethodPost, server.URL+"/api/upstream-subscriptions", "Before upload", before)
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = createdResponse.Body.Close()
+
+	after := []byte("proxies:\n  - name: after-upload\n    type: vless\n    server: after.example\n    port: 8443\n    custom-field: retained\n")
+	response := postMultipartUpstreamSubscription(t, http.MethodPut, server.URL+"/api/upstream-subscriptions/"+created.ID, "After upload", after)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(response.Body)
+		t.Fatalf("edit upload status=%d body=%q", response.StatusCode, message)
+	}
+	var edited struct {
+		Name                   string `json:"name"`
+		ConfiguredDocument     string `json:"configuredDocument"`
+		LastSuccessfulDocument string `json:"lastSuccessfulDocument"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&edited); err != nil {
+		t.Fatal(err)
+	}
+	if edited.Name != "After upload" || edited.ConfiguredDocument != string(after) || edited.LastSuccessfulDocument != string(after) {
+		t.Fatalf("edited uploaded subscription = %+v", edited)
+	}
+}
+
+func TestFailedURLEditPersistsNewConfigurationButKeepsLastSuccessfulDocument(t *testing.T) {
+	stableDocument := []byte("proxies:\n  - name: stable\n    type: ss\n    server: stable.example\n    port: 443\n")
+	upstream := &configuredUpstream{document: stableDocument}
+	server := openApplicationServer(t, upstream)
+	createdResponse := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Before", "kind": "url", "url": "https://old.example/sub", "userAgent": "Old/1.0",
+	})
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = createdResponse.Body.Close()
+
+	upstream.err = errors.New("edited endpoint unavailable")
+	response := putJSONResponse(t, server.URL+"/api/upstream-subscriptions/"+created.ID, map[string]any{
+		"name": "After", "url": "https://user:secret@new.example/sub?token=kept", "userAgent": "New/2.0",
+	})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("failed edit status=%d", response.StatusCode)
+	}
+
+	var subscriptions []struct {
+		Name                   string `json:"name"`
+		URL                    string `json:"url"`
+		UserAgent              string `json:"userAgent"`
+		LastSuccessfulDocument string `json:"lastSuccessfulDocument"`
+		RefreshStatus          string `json:"refreshStatus"`
+		LastError              string `json:"lastError"`
+	}
+	getJSON(t, server.URL+"/api/upstream-subscriptions", &subscriptions)
+	got := subscriptions[0]
+	if got.Name != "After" || got.URL != "https://user:secret@new.example/sub?token=kept" || got.UserAgent != "New/2.0" ||
+		got.LastSuccessfulDocument != string(stableDocument) || got.RefreshStatus != "stale" || !strings.Contains(got.LastError, "edited endpoint unavailable") {
+		t.Fatalf("subscription after failed edit = %+v", got)
 	}
 }
 
@@ -390,7 +462,7 @@ func TestUpstreamSubscriptionAndRefreshStateSurviveApplicationRestart(t *testing
 	getJSON(t, secondServer.URL+"/api/upstream-subscriptions", &subscriptions)
 	got := subscriptions[0]
 	if got.Name != "Persistent" || got.URL != "https://user:secret@example.test/sub" || got.UserAgent != "Custom/1.0" ||
-		got.LastSuccessfulDocument != string(document) || got.RefreshStatus != "failed" || !strings.Contains(got.LastError, "temporary network failure") {
+		got.LastSuccessfulDocument != string(document) || got.RefreshStatus != "stale" || !strings.Contains(got.LastError, "temporary network failure") {
 		t.Fatalf("persisted source = %+v", got)
 	}
 }
@@ -474,6 +546,35 @@ func putJSONResponse(t *testing.T, url string, value any) *http.Response {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func postMultipartUpstreamSubscription(t *testing.T, method string, url string, name string, document []byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	if err := form.WriteField("name", name); err != nil {
+		t.Fatal(err)
+	}
+	file, err := form.CreateFormFile("file", "subscription.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(document); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(method, url, &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", form.FormDataContentType())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
