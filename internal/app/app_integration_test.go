@@ -254,7 +254,7 @@ func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel a
 func openEvaluationApplication(t *testing.T, upstream app.Upstream, kernel app.Kernel, channel app.TestChannel) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
-	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: unavailableScoring{}, Kernel: kernel, TestChannel: channel})
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: &recordingScoring{score: 80}, Kernel: kernel, TestChannel: channel})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -185,7 +185,7 @@ export default function App() {
 }
 
 type EvaluationText = typeof messages[Locale];
-type EvaluationState = { status: "idle" | "running" | "completed" | "failed"; total: number; passed: number; failed: number; results: Array<{ name: string; state: string; medianLatencyMs: number; reason?: string }> };
+type EvaluationState = { status: "idle" | "running" | "completed" | "failed"; total: number; passed: number; failed: number; results: Array<{ name: string; state: string; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
 
 function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
   const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
@@ -204,7 +204,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
   const statusLabel = text[run.status];
   return <section className="panel evaluationPanel" aria-labelledby="evaluation-heading">
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
-    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.medianLatencyMs.toFixed(0)} ms` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}</div>)}</div>}
+    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
 }
 

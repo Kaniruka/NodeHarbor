@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"reflect"
 	"sort"
 	"time"
 
@@ -22,14 +24,16 @@ type evaluationRun struct {
 	Failed     int    `json:"failed"`
 }
 type evaluationNodeResult struct {
-	NodeID          string  `json:"nodeId"`
-	Name            string  `json:"name"`
-	State           string  `json:"state"`
-	Attempts        int     `json:"attempts"`
-	Successful      int     `json:"successful"`
-	MedianLatencyMS float64 `json:"medianLatencyMs"`
-	ExitIdentity    string  `json:"exitIdentity,omitempty"`
-	Reason          string  `json:"reason,omitempty"`
+	NodeID          string   `json:"nodeId"`
+	Name            string   `json:"name"`
+	State           string   `json:"state"`
+	Attempts        int      `json:"attempts"`
+	Successful      int      `json:"successful"`
+	MedianLatencyMS float64  `json:"medianLatencyMs"`
+	ExitIdentity    string   `json:"exitIdentity,omitempty"`
+	AddressFamily   string   `json:"addressFamily,omitempty"`
+	IPScore         *float64 `json:"ipScore,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
 }
 type evaluationRunResponse struct {
 	evaluationRun
@@ -44,11 +48,43 @@ type evaluationNode struct {
 func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+		`CREATE TABLE IF NOT EXISTS score_cache (provider TEXT NOT NULL, exit_identity TEXT NOT NULL, score REAL NOT NULL, address_family TEXT NOT NULL, scored_at TEXT NOT NULL, PRIMARY KEY(provider, exit_identity))`,
 	}
 	for _, statement := range statements {
 		if _, err := application.database.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("initialize Evaluation Run storage: %w", err)
+		}
+	}
+	// #5 created evaluation_results before scoring fields existed. Keep existing
+	// installations readable without requiring a destructive database reset.
+	var columns = map[string]bool{}
+	rows, err := application.database.QueryContext(ctx, `PRAGMA table_info(evaluation_results)`)
+	if err != nil {
+		return fmt.Errorf("inspect Evaluation Run schema: %w", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name, kind string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !columns["address_family"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN address_family TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !columns["ip_score"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN ip_score REAL`); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -141,14 +177,14 @@ func (application *Application) readEvaluationRun(ctx context.Context, id string
 
 func (application *Application) runResponse(ctx context.Context, run evaluationRun) evaluationRunResponse {
 	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}}
-	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
 	if err != nil {
 		return result
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item evaluationNodeResult
-		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.Reason) == nil {
+		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.Reason) == nil {
 			result.Results = append(result.Results, item)
 		}
 	}
@@ -170,7 +206,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		} else {
 			failed++
 		}
-		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.Reason)
+		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.Reason)
 		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
@@ -252,6 +288,21 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = "latency_exceeded: median latency is above 1500ms"
 		return result
 	}
+	if result.ExitIdentity == "" {
+		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
+		return result
+	}
+	score, family, err := application.scoreWithCache(ctx, result.ExitIdentity)
+	result.AddressFamily = family
+	if err != nil {
+		result.Reason = "score_unavailable: " + err.Error()
+		return result
+	}
+	result.IPScore = &score
+	if score < 70 {
+		result.Reason = fmt.Sprintf("low_score: IP Score %.2f is below threshold 70", score)
+		return result
+	}
 	result.State = "passed"
 	return result
 }
@@ -260,4 +311,48 @@ func medianLatency(values []time.Duration) time.Duration {
 	sorted := append([]time.Duration(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	return sorted[len(sorted)/2]
+}
+
+func (application *Application) scoreWithCache(ctx context.Context, exitIdentity string) (float64, string, error) {
+	family := addressFamily(exitIdentity)
+	if family == "" {
+		return 0, "", errors.New("exit identity is not a valid IP address")
+	}
+	provider := scoringProviderKey(application.dependencies.Scoring)
+	var score float64
+	var scoredAt string
+	err := application.database.QueryRowContext(ctx, `SELECT score, scored_at FROM score_cache WHERE provider = ? AND exit_identity = ?`, provider, exitIdentity).Scan(&score, &scoredAt)
+	if err == nil {
+		when, parseErr := time.Parse(time.RFC3339Nano, scoredAt)
+		if parseErr == nil && time.Since(when) <= 24*time.Hour {
+			return score, family, nil
+		}
+	}
+	score, err = application.dependencies.Scoring.Score(ctx, exitIdentity)
+	if err != nil {
+		return 0, family, err
+	}
+	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, provider, exitIdentity, score, family, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, family, fmt.Errorf("store IP Score cache: %w", err)
+	}
+	return score, family, nil
+}
+
+func scoringProviderKey(provider ScoringProvider) string {
+	if named, ok := provider.(interface{ Name() string }); ok && named.Name() != "" {
+		return named.Name()
+	}
+	return reflect.TypeOf(provider).String()
+}
+
+func addressFamily(value string) string {
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	if ip.To4() != nil {
+		return "ipv4"
+	}
+	return "ipv6"
 }
