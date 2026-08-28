@@ -4,7 +4,7 @@ NodeHarbor is a self-hosted tool for aggregating Clash/Mihomo subscriptions, che
 
 The first runnable slice provides a persistent Go/SQLite backend, an embedded React WebUI, system health endpoints, and an initial valid Published Subscription.
 
-The WebUI can manage up to ten Upstream Subscriptions imported from a URL, uploaded YAML file, or pasted YAML. URL Upstream Subscriptions preserve the complete URL and optional User-Agent. Successful raw documents are retained verbatim, while stale refreshes keep the previous successful content and expose the error in the Upstream Subscription list.
+The WebUI can manage up to ten Upstream Subscriptions imported from a URL, uploaded YAML file, or pasted YAML. URL Upstream Subscriptions preserve the complete URL and optional User-Agent. Successful raw documents are retained verbatim; when an Upstream Subscription becomes stale, the previous successful content is kept and the error appears in the Upstream Subscription list.
 
 ## Run on Windows
 

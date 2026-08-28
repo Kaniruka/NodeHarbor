@@ -169,7 +169,7 @@ test("failed refresh shows a stale Upstream Subscription and its reason", async 
   render(<App />);
   await screen.findByRole("heading", { name: "Stale" });
   await userEvent.click(screen.getByRole("button", { name: "刷新" }));
-  expect(await screen.findByText("已过期，使用上次成功内容")).toBeInTheDocument();
+  expect(await screen.findByText("已陈旧，使用上次成功内容")).toBeInTheDocument();
   expect(screen.getByText("fetch Upstream Subscription: connection timed out")).toBeInTheDocument();
 });
 

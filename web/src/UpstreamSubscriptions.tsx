@@ -35,7 +35,7 @@ const copy = {
     cancel: "取消编辑",
     empty: "还没有上游订阅。选择一种方式添加第一个上游订阅。",
     success: "刷新成功",
-    stale: "已过期，使用上次成功内容",
+    stale: "已陈旧，使用上次成功内容",
     pending: "等待刷新",
     nodes: (value: number) => `${value} 个代理节点`,
     refresh: "刷新",

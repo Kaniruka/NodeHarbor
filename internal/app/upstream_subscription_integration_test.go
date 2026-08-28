@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -464,6 +465,42 @@ func TestUpstreamSubscriptionAndRefreshStateSurviveApplicationRestart(t *testing
 	if got.Name != "Persistent" || got.URL != "https://user:secret@example.test/sub" || got.UserAgent != "Custom/1.0" ||
 		got.LastSuccessfulDocument != string(document) || got.RefreshStatus != "stale" || !strings.Contains(got.LastError, "temporary network failure") {
 		t.Fatalf("persisted source = %+v", got)
+	}
+}
+
+func TestLegacyFailedRefreshStatusMigratesToStale(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
+	firstApplication, firstServer := startApplication(t, databasePath, &configuredUpstream{})
+	createdResponse := postJSONResponse(t, firstServer.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Legacy", "kind": "paste", "document": "proxies:\n  - name: legacy\n    type: ss\n    server: legacy.example\n    port: 443\n",
+	})
+	_ = createdResponse.Body.Close()
+	firstServer.Close()
+	if err := firstApplication.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE upstream_subscriptions SET refresh_status = 'failed'`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondApplication, secondServer := startApplication(t, databasePath, &configuredUpstream{})
+	defer secondServer.Close()
+	defer secondApplication.Close()
+	var subscriptions []struct {
+		RefreshStatus string `json:"refreshStatus"`
+	}
+	getJSON(t, secondServer.URL+"/api/upstream-subscriptions", &subscriptions)
+	if len(subscriptions) != 1 || subscriptions[0].RefreshStatus != "stale" {
+		t.Fatalf("migrated subscriptions = %+v", subscriptions)
 	}
 }
 

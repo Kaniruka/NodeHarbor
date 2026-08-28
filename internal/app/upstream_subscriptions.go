@@ -85,7 +85,7 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 		WHEN (SELECT COUNT(*) FROM upstream_subscriptions) >= 10
 		BEGIN
 			SELECT RAISE(ABORT, 'at most 10 Upstream Subscriptions are allowed');
-		END`}
+		END`, `UPDATE upstream_subscriptions SET refresh_status = 'stale' WHERE refresh_status = 'failed'`}
 	for _, statement := range statements {
 		if _, err := application.database.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("initialize Upstream Subscription storage: %w", err)
