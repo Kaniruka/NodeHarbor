@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,6 +85,7 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 	)`, `CREATE TABLE IF NOT EXISTS proxy_nodes (
 		id TEXT PRIMARY KEY,
 		subscription_id TEXT NOT NULL REFERENCES upstream_subscriptions(id) ON DELETE CASCADE,
+		fingerprint TEXT NOT NULL DEFAULT '',
 		name TEXT NOT NULL,
 		original_name TEXT NOT NULL,
 		config BLOB NOT NULL,
@@ -98,8 +100,71 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 		END`, `UPDATE upstream_subscriptions SET refresh_status = 'stale' WHERE refresh_status = 'failed'`}
 	for _, statement := range statements {
 		if _, err := application.database.ExecContext(ctx, statement); err != nil {
+			if strings.Contains(statement, "CREATE TABLE IF NOT EXISTS proxy_nodes") && strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
 			return fmt.Errorf("initialize Upstream Subscription storage: %w", err)
 		}
+	}
+	if _, err := application.database.ExecContext(ctx, `ALTER TABLE proxy_nodes ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("migrate Proxy Node identity storage: %w", err)
+	}
+	if err := application.migrateProxyNodeFingerprints(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (application *Application) migrateProxyNodeFingerprints(ctx context.Context) error {
+	tx, err := application.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin Proxy Node identity migration: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, subscription_id, config FROM proxy_nodes WHERE fingerprint = ''`)
+	if err != nil {
+		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
+	}
+	type legacyNode struct {
+		id, subscriptionID string
+		config             []byte
+	}
+	legacy := make([]legacyNode, 0)
+	for rows.Next() {
+		var node legacyNode
+		if err := rows.Scan(&node.id, &node.subscriptionID, &node.config); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan legacy Proxy Node identity: %w", err)
+		}
+		legacy = append(legacy, node)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy Proxy Node identities: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
+	}
+	occurrences := map[string]int{}
+	for _, node := range legacy {
+		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config)
+		if err != nil {
+			return fmt.Errorf("fingerprint legacy Proxy Node: %w", err)
+		}
+		occurrences[node.subscriptionID+"/"+fingerprint]++
+		newID := stableProxyNodeID(node.subscriptionID, fingerprint, occurrences[node.subscriptionID+"/"+fingerprint])
+		if newID != node.id {
+			if _, err := tx.ExecContext(ctx, `UPDATE evaluation_results SET node_id = ? WHERE node_id = ?`, newID, node.id); err != nil && !strings.Contains(err.Error(), "no such table") {
+				return fmt.Errorf("migrate evaluation result identity: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET id = ?, fingerprint = ? WHERE id = ?`, newID, fingerprint, node.id); err != nil {
+				return fmt.Errorf("migrate Proxy Node identity: %w", err)
+			}
+		} else if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET fingerprint = ? WHERE id = ?`, fingerprint, node.id); err != nil {
+			return fmt.Errorf("store Proxy Node fingerprint: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit Proxy Node identity migration: %w", err)
 	}
 	return nil
 }
@@ -425,6 +490,19 @@ func (application *Application) validateUpstreamDocument(ctx context.Context, do
 	return len(parsed.Proxies), nil
 }
 
+type storedProxyNode struct {
+	ID             string
+	SubscriptionID string
+	SourceName     string
+	Name           string
+	OriginalName   string
+	Fingerprint    string
+	Config         map[string]any
+	State          proxyNodeState
+	Reason         string
+	CreatedAt      string
+}
+
 func (application *Application) replaceProxyNodes(ctx context.Context, subscriptionID string, document []byte) error {
 	var parsed struct {
 		Proxies []map[string]any `yaml:"proxies"`
@@ -437,8 +515,8 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 	if err := application.database.QueryRowContext(ctx, `SELECT name FROM upstream_subscriptions WHERE id = ?`, subscriptionID).Scan(&sourceName); err != nil {
 		return err
 	}
-	seen := map[string]int{}
-	nodes := make([]evaluatedProxyNode, 0, len(parsed.Proxies))
+	occurrences := map[string]int{}
+	nodes := make([]storedProxyNode, 0, len(parsed.Proxies))
 	for index, config := range parsed.Proxies {
 		original, _ := config["name"].(string)
 		if strings.TrimSpace(original) == "" {
@@ -448,15 +526,14 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 		if err != nil {
 			return err
 		}
-		seen[original]++
-		display := fmt.Sprintf("[%s] %s", stableSourcePrefix(sourceName), original)
-		if seen[original] > 1 {
-			display += " (" + fingerprint[:8] + fmt.Sprintf("-%d", seen[original]) + ")"
-		}
-		config["name"] = display
-		node := evaluatedProxyNode{Name: display, OriginalName: original, Config: config, State: proxyNodeAccepted}
+		occurrences[fingerprint]++
+		id := stableProxyNodeID(subscriptionID, fingerprint, occurrences[fingerprint])
+		validationConfig := cloneProxyNodeConfig(config)
+		validationName := fmt.Sprintf("[%s] %s", stableSourcePrefix(sourceName), original)
+		validationConfig["name"] = validationName
+		node := storedProxyNode{ID: id, SubscriptionID: subscriptionID, SourceName: sourceName, OriginalName: original, Fingerprint: fingerprint, Config: config, State: proxyNodeAccepted, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if validator, ok := application.dependencies.Kernel.(NodeValidator); ok {
-			if err := validator.ValidateNode(ctx, ProxyNode{Name: display, Config: config}); err != nil {
+			if err := validator.ValidateNode(ctx, ProxyNode{Name: validationName, Config: validationConfig}); err != nil {
 				node.State = proxyNodeRejected
 				node.Reason = structuredNodeReason(err)
 			}
@@ -468,29 +545,135 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 		return err
 	}
 	defer tx.Rollback()
+	existing, err := application.loadStoredProxyNodes(ctx, tx, subscriptionID)
+	if err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE subscription_id = ?`, subscriptionID); err != nil {
 		return err
 	}
-	for index, node := range nodes {
+	allNodes := append(existing, nodes...)
+	allocatedNames := allocateProxyNodeNames(allNodes)
+	for index := range allNodes {
+		node := &allNodes[index]
+		node.Name = allocatedNames[node.ID]
+		node.Config = cloneProxyNodeConfig(node.Config)
+		node.Config["name"] = node.Name
 		config, err := yaml.Marshal(node.Config)
 		if err != nil {
 			return err
 		}
-		id := fmt.Sprintf("%s-%d", subscriptionID, index)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO proxy_nodes(id, subscription_id, name, original_name, config, state, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, subscriptionID, node.Name, node.OriginalName, config, node.State, node.Reason, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		if index < len(existing) {
+			if _, err = tx.ExecContext(ctx, `UPDATE proxy_nodes SET name = ?, config = ? WHERE id = ?`, node.Name, config, node.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO proxy_nodes(id, subscription_id, fingerprint, name, original_name, config, state, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.SubscriptionID, node.Fingerprint, node.Name, node.OriginalName, config, node.State, node.Reason, node.CreatedAt); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
+func (application *Application) loadStoredProxyNodes(ctx context.Context, tx *sql.Tx, excludingSubscriptionID string) ([]storedProxyNode, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT p.id, p.subscription_id, s.name, p.name, p.original_name, p.fingerprint, p.config, p.state, p.reason, p.created_at
+		FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.subscription_id <> ?`, excludingSubscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]storedProxyNode, 0)
+	for rows.Next() {
+		var node storedProxyNode
+		var config []byte
+		if err := rows.Scan(&node.ID, &node.SubscriptionID, &node.SourceName, &node.Name, &node.OriginalName, &node.Fingerprint, &config, &node.State, &node.Reason, &node.CreatedAt); err != nil {
+			return nil, err
+		}
+		if node.Fingerprint == "" {
+			var err error
+			node.Fingerprint, err = normalizedNodeFingerprintFromYAML(config)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := yaml.Unmarshal(config, &node.Config); err != nil {
+			return nil, err
+		}
+		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
+	groups := map[string][]*storedProxyNode{}
+	for index := range nodes {
+		node := &nodes[index]
+		base := fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
+		groups[base] = append(groups[base], node)
+	}
+	result := make(map[string]string, len(nodes))
+	for base, group := range groups {
+		if len(group) == 1 {
+			result[group[0].ID] = base
+			continue
+		}
+		sort.Slice(group, func(left, right int) bool {
+			if group[left].Fingerprint != group[right].Fingerprint {
+				return group[left].Fingerprint < group[right].Fingerprint
+			}
+			return group[left].SubscriptionID < group[right].SubscriptionID
+		})
+		for index, node := range group {
+			suffix := node.Fingerprint[:8]
+			if index > 0 && group[index-1].Fingerprint == node.Fingerprint {
+				suffix += "-" + shortStableID(node.SubscriptionID)
+			}
+			result[node.ID] = base + " (" + suffix + ")"
+		}
+	}
+	return result
+}
+
+func stableProxyNodeID(subscriptionID, fingerprint string, occurrence int) string {
+	if occurrence <= 1 {
+		return subscriptionID + "-" + fingerprint
+	}
+	return subscriptionID + "-" + fingerprint + "-duplicate-" + fmt.Sprint(occurrence)
+}
+
+func shortStableID(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
+}
+
+func cloneProxyNodeConfig(config map[string]any) map[string]any {
+	clone := make(map[string]any, len(config))
+	for key, value := range config {
+		clone[key] = value
+	}
+	return clone
+}
+
 func normalizedNodeFingerprint(config map[string]any) (string, error) {
-	data, err := yaml.Marshal(config)
+	canonical := cloneProxyNodeConfig(config)
+	delete(canonical, "name")
+	data, err := yaml.Marshal(canonical)
 	if err != nil {
 		return "", err
 	}
 	digest := sha256.Sum256(data)
 	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func normalizedNodeFingerprintFromYAML(config []byte) (string, error) {
+	var parsed map[string]any
+	if err := yaml.Unmarshal(config, &parsed); err != nil {
+		return "", err
+	}
+	return normalizedNodeFingerprint(parsed)
 }
 
 func stableSourcePrefix(name string) string {
@@ -508,7 +691,7 @@ func (application *Application) handleListProxyNodes(response http.ResponseWrite
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	rows, err := application.database.QueryContext(request.Context(), `SELECT name, original_name, config, state, reason FROM proxy_nodes WHERE subscription_id = ? ORDER BY id`, request.PathValue("id"))
+	rows, err := application.database.QueryContext(request.Context(), `SELECT id, fingerprint, name, original_name, config, state, reason FROM proxy_nodes WHERE subscription_id = ? ORDER BY id`, request.PathValue("id"))
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -518,7 +701,7 @@ func (application *Application) handleListProxyNodes(response http.ResponseWrite
 	for rows.Next() {
 		var node evaluatedProxyNode
 		var config []byte
-		if err := rows.Scan(&node.Name, &node.OriginalName, &config, &node.State, &node.Reason); err != nil {
+		if err := rows.Scan(&node.ID, &node.Fingerprint, &node.Name, &node.OriginalName, &config, &node.State, &node.Reason); err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return
 		}

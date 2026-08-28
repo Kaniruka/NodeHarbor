@@ -41,6 +41,8 @@ const (
 )
 
 type evaluatedProxyNode struct {
+	ID           string         `json:"id"`
+	Fingerprint  string         `json:"fingerprint"`
 	Name         string         `json:"name"`
 	OriginalName string         `json:"originalName"`
 	Config       map[string]any `json:"config"`

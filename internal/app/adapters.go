@@ -88,13 +88,56 @@ func (StructuralYAMLValidator) Validate(_ context.Context, document []byte) erro
 // executable configured by the platform assembly.
 type MihomoKernel struct {
 	executablePath string
+	build          MihomoBuild
+}
+
+type MihomoBuild struct {
+	Platform          string
+	Version           string
+	Asset             string
+	ArchiveSHA256     string
+	ExecutableSHA256  string
+	LicenseIdentifier string
+}
+
+var WindowsMihomoBuild = MihomoBuild{
+	Platform:          "windows-amd64",
+	Version:           "v1.19.30",
+	Asset:             "mihomo-windows-amd64-v1.19.30.zip",
+	ArchiveSHA256:     "22C09FD67673895EF7CD6B1820563918275C3D316F2462B306208675118DB3C0",
+	ExecutableSHA256:  "F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761",
+	LicenseIdentifier: "GPL-3.0-or-later",
+}
+
+var KernelSUMihomoBuild = MihomoBuild{
+	Platform:          "android-arm64-v8",
+	Version:           "v1.19.30",
+	Asset:             "mihomo-android-arm64-v8-v1.19.30.gz",
+	ArchiveSHA256:     "19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD",
+	ExecutableSHA256:  "94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD",
+	LicenseIdentifier: "GPL-3.0-or-later",
 }
 
 const MihomoVersion = "v1.19.30"
 const MihomoExecutableSHA256 = "F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761"
 
+func MihomoBuildForPlatform(platform string) (MihomoBuild, error) {
+	switch platform {
+	case "windows":
+		return WindowsMihomoBuild, nil
+	case "android":
+		return KernelSUMihomoBuild, nil
+	default:
+		return MihomoBuild{}, fmt.Errorf("unsupported Mihomo platform %q", platform)
+	}
+}
+
 func NewMihomoKernel(executablePath string) MihomoKernel {
-	return MihomoKernel{executablePath: executablePath}
+	return NewMihomoKernelWithBuild(executablePath, WindowsMihomoBuild)
+}
+
+func NewMihomoKernelWithBuild(executablePath string, build MihomoBuild) MihomoKernel {
+	return MihomoKernel{executablePath: executablePath, build: build}
 }
 
 func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error {
@@ -115,7 +158,7 @@ func (kernel MihomoKernel) validateDocument(ctx context.Context, document []byte
 	if kernel.executablePath == "" {
 		return errors.New("Mihomo executable path is required")
 	}
-	if err := verifyMihomoExecutable(kernel.executablePath); err != nil {
+	if err := verifyMihomoExecutable(kernel.executablePath, kernel.build); err != nil {
 		return err
 	}
 	workingDirectory, err := os.MkdirTemp("", "nodeharbor-mihomo-validation-")
@@ -134,10 +177,10 @@ func (kernel MihomoKernel) validateDocument(ctx context.Context, document []byte
 	return nil
 }
 
-func verifyMihomoExecutable(path string) error {
+func verifyMihomoExecutable(path string, build MihomoBuild) error {
 	executable, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open pinned Mihomo %s executable: %w", MihomoVersion, err)
+		return fmt.Errorf("open pinned Mihomo %s executable for %s: %w", build.Version, build.Platform, err)
 	}
 	defer executable.Close()
 	hash := sha256.New()
@@ -145,8 +188,8 @@ func verifyMihomoExecutable(path string) error {
 		return fmt.Errorf("hash pinned Mihomo executable: %w", err)
 	}
 	actual := strings.ToUpper(fmt.Sprintf("%x", hash.Sum(nil)))
-	if actual != MihomoExecutableSHA256 {
-		return fmt.Errorf("Mihomo executable digest mismatch: got %s, want %s", actual, MihomoExecutableSHA256)
+	if actual != strings.ToUpper(build.ExecutableSHA256) {
+		return fmt.Errorf("Mihomo executable digest mismatch for %s: got %s, want %s", build.Platform, actual, strings.ToUpper(build.ExecutableSHA256))
 	}
 	return nil
 }

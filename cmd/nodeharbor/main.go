@@ -37,10 +37,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open embedded WebUI: %w", err)
 	}
+	mihomoBuild, err := app.MihomoBuildForPlatform(runtime.GOOS)
+	if err != nil {
+		return err
+	}
 	application, err := app.Open(context.Background(), app.Config{
 		DatabasePath: filepath.Join(*dataDirectory, "nodeharbor.db"),
 		WebAssets:    assets,
-	}, app.DefaultDependencies(app.NewMihomoKernel(defaultMihomoPath())))
+	}, app.DefaultDependencies(app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)))
 	if err != nil {
 		return err
 	}
@@ -81,10 +85,15 @@ func run() error {
 func defaultMihomoPath() string {
 	executable, err := os.Executable()
 	if err != nil {
-		if runtime.GOOS == "windows" { return "nodeharbor-core.exe" }; return "nodeharbor-core"
+		if runtime.GOOS == "windows" {
+			return "nodeharbor-core.exe"
+		}
+		return "nodeharbor-core"
 	}
 	coreName := "nodeharbor-core"
-	if runtime.GOOS == "windows" { coreName += ".exe" }
+	if runtime.GOOS == "windows" {
+		coreName += ".exe"
+	}
 	return filepath.Join(filepath.Dir(executable), coreName)
 }
 

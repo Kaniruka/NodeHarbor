@@ -183,6 +183,124 @@ func TestNodeValidationKeepsValidNodesWhenAnotherNodeFails(t *testing.T) {
 	}
 }
 
+func TestProxyNodeIdentitySurvivesReorderedEquivalentRefreshAndCrossSourceNamesStayUnique(t *testing.T) {
+	firstDocument := `proxies:
+  - name: alpha
+    type: vless
+    server: alpha.example
+    port: 443
+    reality-opts:
+      public-key: alpha-key
+    client-fingerprint: chrome
+  - name: beta
+    type: trojan
+    password: beta-secret
+    server: beta.example
+    port: 8443
+`
+	upstream := &configuredUpstream{document: []byte(firstDocument)}
+	server := openApplicationServer(t, upstream)
+	createdResponse := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Shared", "kind": "url", "url": "https://first.example/sub",
+	})
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(createdResponse.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = createdResponse.Body.Close()
+
+	firstNodes := readProxyNodes(t, server.URL, created.ID)
+	identityByOriginalName := map[string]string{}
+	fingerprintByOriginalName := map[string]string{}
+	nameByOriginalName := map[string]string{}
+	for _, node := range firstNodes {
+		identityByOriginalName[node.OriginalName] = node.ID
+		fingerprintByOriginalName[node.OriginalName] = node.Fingerprint
+		nameByOriginalName[node.OriginalName] = node.Name
+	}
+
+	secondDocument := `proxies:
+  - server: beta.example
+    port: 8443
+    password: beta-secret
+    type: trojan
+    name: beta
+  - client-fingerprint: chrome
+    reality-opts:
+      public-key: alpha-key
+    port: 443
+    server: alpha.example
+    type: vless
+    name: alpha
+`
+	upstream.document = []byte(secondDocument)
+	refreshResponse, err := http.Post(server.URL+"/api/upstream-subscriptions/"+created.ID+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshResponse.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(refreshResponse.Body)
+		_ = refreshResponse.Body.Close()
+		t.Fatalf("refresh status=%d body=%q", refreshResponse.StatusCode, message)
+	}
+	_ = refreshResponse.Body.Close()
+
+	for _, node := range readProxyNodes(t, server.URL, created.ID) {
+		if node.ID != identityByOriginalName[node.OriginalName] || node.Fingerprint != fingerprintByOriginalName[node.OriginalName] || node.Name != nameByOriginalName[node.OriginalName] {
+			t.Fatalf("node identity changed after reorder: %+v", node)
+		}
+		if node.Config["name"] != node.Name || node.Config["reality-opts"] == nil && node.OriginalName == "alpha" {
+			t.Fatalf("node fields were not preserved: %+v", node)
+		}
+	}
+
+	secondResponse := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Shared", "kind": "paste", "document": "proxies:\n  - name: alpha\n    type: ss\n    server: another.example\n    port: 443\n",
+	})
+	if secondResponse.StatusCode != http.StatusCreated {
+		message, _ := io.ReadAll(secondResponse.Body)
+		_ = secondResponse.Body.Close()
+		t.Fatalf("second source status=%d body=%q", secondResponse.StatusCode, message)
+	}
+	var second struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(secondResponse.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	_ = secondResponse.Body.Close()
+
+	allNames := map[string]bool{}
+	for _, sourceID := range []string{created.ID, second.ID} {
+		for _, node := range readProxyNodes(t, server.URL, sourceID) {
+			if allNames[node.Name] {
+				t.Fatalf("duplicate Proxy Node display name %q", node.Name)
+			}
+			allNames[node.Name] = true
+			if !strings.HasPrefix(node.Name, "[Shared] "+node.OriginalName) {
+				t.Fatalf("display name lost source prefix: %q", node.Name)
+			}
+		}
+	}
+}
+
+type proxyNodeResponse struct {
+	ID           string         `json:"id"`
+	Fingerprint  string         `json:"fingerprint"`
+	Name         string         `json:"name"`
+	OriginalName string         `json:"originalName"`
+	Config       map[string]any `json:"config"`
+}
+
+func readProxyNodes(t *testing.T, baseURL, subscriptionID string) []proxyNodeResponse {
+	t.Helper()
+	var nodes []proxyNodeResponse
+	getJSON(t, baseURL+"/api/upstream-subscriptions/"+subscriptionID+"/nodes", &nodes)
+	return nodes
+}
+
 func TestEvaluationRunAppliesAvailabilityRulesAndFailsClosed(t *testing.T) {
 	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}}
 	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: available\n    type: ss\n    server: good.example\n    port: 443\n")}, &nodeValidationKernel{}, channel)
