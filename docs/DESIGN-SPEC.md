@@ -1,11 +1,11 @@
 # NodeHarbor Design Specification
 
-- Status: Draft, requirements frozen
-- Version: 0.1
+- Status: Confirmed for implementation
+- Version: 0.2
 - Frozen on: 2026-08-28
 - Implementation: Not started
 
-This document records the product and engineering decisions agreed during the design interview. The domain vocabulary in [`CONTEXT.md`](../CONTEXT.md) is normative. One unresolved Surfing TUN decision is listed at the end.
+This document records the product and engineering decisions agreed during the design interview. The domain vocabulary in [`CONTEXT.md`](../CONTEXT.md) is normative.
 
 ## 1. Product boundary
 
@@ -176,13 +176,11 @@ Required isolation:
 - Verify the observed exit identity before accepting a score or publishing a new snapshot.
 - Fail closed: uncertainty about routing isolation pauses publication and preserves the previous snapshot.
 
-### 14.1 Open decision: Surfing TUN mode
+### 14.1 Accepted behavior: Surfing TUN mode
 
 Surfing's TUN mode may recapture NodeHarbor's underlying proxy-engine connections at the routing layer even when UID/GID bypass works for REDIRECT or TPROXY.
 
-Proposed first-release behavior: detect active Surfing TUN mode, pause evaluation, display an incompatibility warning, and continue serving the previous publication snapshot. Supporting simultaneous Surfing TUN evaluation would require a separately designed and device-tested network-namespace or physical-interface binding solution.
-
-This proposal is not yet accepted by the user and blocks the final `confirmed for implementation` status.
+The first release detects active Surfing TUN mode, pauses evaluation, displays an incompatibility warning, and continues serving the previous publication snapshot. It does not modify or stop Surfing. Supporting simultaneous Surfing TUN evaluation would require a separately designed and device-tested network-namespace or physical-interface binding solution.
 
 ## 15. Failure guarantees
 
@@ -202,6 +200,7 @@ This proposal is not yet accepted by the user and blocks the final `confirmed fo
 - LAN clients can fetch the published subscription but cannot reach management APIs.
 - Publication remains unchanged after an upstream-wide failure, provider-wide failure, invalid generated YAML, or process interruption.
 - With Surfing in REDIRECT or TPROXY mode, neither module modifies, stops, or adopts the other's process, configuration, ports, or routing state.
+- With Surfing TUN mode active, NodeHarbor pauses evaluation, reports the incompatibility, and continues serving the previous publication snapshot.
 
 ## 17. Explicitly excluded from the first release
 
@@ -214,3 +213,4 @@ This proposal is not yet accepted by the user and blocks the final `confirmed fo
 - Windows service or automatic startup.
 - Automatic Mihomo binary updates.
 - Headless-browser automation for scoring websites.
+- Simultaneous evaluation while Surfing TUN mode is active.
