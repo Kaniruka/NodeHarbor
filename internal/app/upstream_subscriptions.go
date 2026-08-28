@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -80,7 +81,16 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 		last_success_at TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
-	)`, `CREATE TRIGGER IF NOT EXISTS enforce_upstream_subscription_limit
+	)`, `CREATE TABLE IF NOT EXISTS proxy_nodes (
+		id TEXT PRIMARY KEY,
+		subscription_id TEXT NOT NULL REFERENCES upstream_subscriptions(id) ON DELETE CASCADE,
+		name TEXT NOT NULL,
+		original_name TEXT NOT NULL,
+		config BLOB NOT NULL,
+		state TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+	)`, `CREATE INDEX IF NOT EXISTS proxy_nodes_subscription_idx ON proxy_nodes(subscription_id, id)`, `CREATE TRIGGER IF NOT EXISTS enforce_upstream_subscription_limit
 		BEFORE INSERT ON upstream_subscriptions
 		WHEN (SELECT COUNT(*) FROM upstream_subscriptions) >= 10
 		BEGIN
@@ -96,6 +106,7 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 
 func (application *Application) registerUpstreamSubscriptionRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/upstream-subscriptions", application.handleListUpstreamSubscriptions)
+	mux.HandleFunc("GET /api/upstream-subscriptions/{id}/nodes", application.handleListProxyNodes)
 	mux.HandleFunc("POST /api/upstream-subscriptions", application.handleCreateUpstreamSubscription)
 	mux.HandleFunc("PUT /api/upstream-subscriptions/{id}", application.handleUpdateUpstreamSubscription)
 	mux.HandleFunc("PATCH /api/upstream-subscriptions/{id}", application.handleSetUpstreamSubscriptionEnabled)
@@ -177,6 +188,10 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 			return
 		}
 		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if err := application.replaceProxyNodes(request.Context(), id, document); err != nil {
+		writeError(response, http.StatusInternalServerError, fmt.Errorf("store Proxy Node evaluation: %w", err))
 		return
 	}
 	subscription, err := application.getUpstreamSubscription(request.Context(), id)
@@ -265,14 +280,30 @@ func (application *Application) handleSetUpstreamSubscriptionEnabled(response ht
 }
 
 func (application *Application) handleDeleteUpstreamSubscription(response http.ResponseWriter, request *http.Request) {
-	result, err := application.database.ExecContext(request.Context(), `DELETE FROM upstream_subscriptions WHERE id = ?`, request.PathValue("id"))
+	tx, err := application.database.BeginTx(request.Context(), nil)
 	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := tx.ExecContext(request.Context(), `DELETE FROM proxy_nodes WHERE subscription_id = ?`, request.PathValue("id")); err != nil {
+		_ = tx.Rollback()
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	result, err := tx.ExecContext(request.Context(), `DELETE FROM upstream_subscriptions WHERE id = ?`, request.PathValue("id"))
+	if err != nil {
+		_ = tx.Rollback()
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
 	changed, err := result.RowsAffected()
 	if err != nil || changed == 0 {
+		_ = tx.Rollback()
 		writeError(response, http.StatusNotFound, errors.New("Upstream Subscription not found"))
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)
@@ -305,6 +336,9 @@ func (application *Application) synchronizeUpstreamSubscription(ctx context.Cont
 		WHERE id = ?`, subscription.Name, subscription.URL, subscription.UserAgent, subscription.ConfiguredDocument,
 		document, proxyNodeCount, upstreamRefreshSuccess, now, now, subscription.ID)
 	if err != nil {
+		return upstreamSubscription{}, http.StatusInternalServerError, err
+	}
+	if err := application.replaceProxyNodes(ctx, subscription.ID, document); err != nil {
 		return upstreamSubscription{}, http.StatusInternalServerError, err
 	}
 	updated, err := application.getUpstreamSubscription(ctx, subscription.ID)
@@ -383,10 +417,122 @@ func (application *Application) validateUpstreamDocument(ctx context.Context, do
 	if len(parsed.Proxies) == 0 {
 		return 0, errors.New("Upstream Subscription contains no Proxy Nodes")
 	}
-	if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
-		return 0, fmt.Errorf("Mihomo rejected Upstream Subscription: %w", err)
+	if _, supportsNodeValidation := application.dependencies.Kernel.(NodeValidator); !supportsNodeValidation {
+		if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
+			return 0, fmt.Errorf("Mihomo rejected Upstream Subscription: %w", err)
+		}
 	}
 	return len(parsed.Proxies), nil
+}
+
+func (application *Application) replaceProxyNodes(ctx context.Context, subscriptionID string, document []byte) error {
+	var parsed struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(document, &parsed); err != nil {
+		return err
+	}
+	// The persisted source name supplies the stable display prefix.
+	var sourceName string
+	if err := application.database.QueryRowContext(ctx, `SELECT name FROM upstream_subscriptions WHERE id = ?`, subscriptionID).Scan(&sourceName); err != nil {
+		return err
+	}
+	seen := map[string]int{}
+	nodes := make([]evaluatedProxyNode, 0, len(parsed.Proxies))
+	for index, config := range parsed.Proxies {
+		original, _ := config["name"].(string)
+		if strings.TrimSpace(original) == "" {
+			original = fmt.Sprintf("unnamed-%d", index+1)
+		}
+		fingerprint, err := normalizedNodeFingerprint(config)
+		if err != nil {
+			return err
+		}
+		seen[original]++
+		display := fmt.Sprintf("[%s] %s", stableSourcePrefix(sourceName), original)
+		if seen[original] > 1 {
+			display += " (" + fingerprint[:8] + fmt.Sprintf("-%d", seen[original]) + ")"
+		}
+		config["name"] = display
+		node := evaluatedProxyNode{Name: display, OriginalName: original, Config: config, State: proxyNodeAccepted}
+		if validator, ok := application.dependencies.Kernel.(NodeValidator); ok {
+			if err := validator.ValidateNode(ctx, ProxyNode{Name: display, Config: config}); err != nil {
+				node.State = proxyNodeRejected
+				node.Reason = structuredNodeReason(err)
+			}
+		}
+		nodes = append(nodes, node)
+	}
+	tx, err := application.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE subscription_id = ?`, subscriptionID); err != nil {
+		return err
+	}
+	for index, node := range nodes {
+		config, err := yaml.Marshal(node.Config)
+		if err != nil {
+			return err
+		}
+		id := fmt.Sprintf("%s-%d", subscriptionID, index)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO proxy_nodes(id, subscription_id, name, original_name, config, state, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, subscriptionID, node.Name, node.OriginalName, config, node.State, node.Reason, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func normalizedNodeFingerprint(config map[string]any) (string, error) {
+	data, err := yaml.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func stableSourcePrefix(name string) string {
+	name = strings.Join(strings.Fields(name), " ")
+	if name == "" {
+		return "source"
+	}
+	return name
+}
+
+func structuredNodeReason(err error) string { return "validation_failed: " + err.Error() }
+
+func (application *Application) handleListProxyNodes(response http.ResponseWriter, request *http.Request) {
+	if _, err := application.getUpstreamSubscription(request.Context(), request.PathValue("id")); err != nil {
+		writeError(response, http.StatusNotFound, err)
+		return
+	}
+	rows, err := application.database.QueryContext(request.Context(), `SELECT name, original_name, config, state, reason FROM proxy_nodes WHERE subscription_id = ? ORDER BY id`, request.PathValue("id"))
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	result := make([]evaluatedProxyNode, 0)
+	for rows.Next() {
+		var node evaluatedProxyNode
+		var config []byte
+		if err := rows.Scan(&node.Name, &node.OriginalName, &config, &node.State, &node.Reason); err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		if err := yaml.Unmarshal(config, &node.Config); err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		result = append(result, node)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (application *Application) listUpstreamSubscriptions(ctx context.Context) ([]upstreamSubscription, error) {

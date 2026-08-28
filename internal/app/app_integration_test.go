@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -143,6 +145,40 @@ func TestBlackBoxEvaluationRequestTraversesReplaceableAdapters(t *testing.T) {
 	}
 }
 
+func TestNodeValidationKeepsValidNodesWhenAnotherNodeFails(t *testing.T) {
+	kernel := &nodeValidationKernel{}
+	server := openTestApplicationWithKernel(t, &recordingUpstream{document: []byte("proxies:\n  - name: good\n    type: ss\n    server: good.example\n    port: 443\n  - name: bad\n    type: ss\n    server: bad.example\n    port: 443\n")}, kernel)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "My Source", "kind": "url", "url": "https://example.test/sub"})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", response.StatusCode)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	var nodes []struct{ Name, State, Reason string }
+	getJSON(t, server.URL+"/api/upstream-subscriptions/"+created.ID+"/nodes", &nodes)
+	if len(nodes) != 2 || nodes[0].Name != "[My Source] good" || nodes[0].State != "accepted" || nodes[1].State != "rejected" || !strings.Contains(nodes[1].Reason, "validation_failed") {
+		t.Fatalf("nodes=%+v", nodes)
+	}
+}
+
+func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel app.Kernel) *httptest.Server {
+	t.Helper()
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: unavailableScoring{}, Kernel: kernel, TestChannel: unavailableTestChannel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { _ = instance.Close() })
+	return server
+}
+
 func TestInitialPublishedSubscriptionPassesMihomoValidation(t *testing.T) {
 	mihomoPath := os.Getenv("NODEHARBOR_TEST_MIHOMO")
 	if mihomoPath == "" {
@@ -239,6 +275,16 @@ type recordingKernel struct{ validated []byte }
 
 func (kernel *recordingKernel) Validate(_ context.Context, document []byte) error {
 	kernel.validated = append([]byte(nil), document...)
+	return nil
+}
+
+type nodeValidationKernel struct{}
+
+func (*nodeValidationKernel) Validate(context.Context, []byte) error { return nil }
+func (*nodeValidationKernel) ValidateNode(_ context.Context, node app.ProxyNode) error {
+	if strings.Contains(node.Name, "bad") {
+		return errors.New("unsupported protocol")
+	}
 	return nil
 }
 

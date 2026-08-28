@@ -17,6 +17,8 @@ type UpstreamSubscription = {
   lastError?: string;
 };
 
+type ProxyNode = { name: string; originalName: string; config: Record<string, unknown>; state: "accepted" | "rejected"; reason?: string };
+
 const copy = {
   "zh-CN": {
     heading: "上游订阅",
@@ -48,6 +50,9 @@ const copy = {
     actionError: "操作失败，请重试。",
     defaultUserAgent: "留空时使用 Mihomo 兼容标识",
     requiredFile: "请选择 YAML 文件。",
+    accepted: "已接受",
+    rejected: "已拒绝",
+    nodeDetails: "节点校验结果",
   },
   en: {
     heading: "Upstream Subscriptions",
@@ -79,6 +84,9 @@ const copy = {
     actionError: "The operation failed. Try again.",
     defaultUserAgent: "Leave blank to use a Mihomo-compatible identifier",
     requiredFile: "Choose a YAML file.",
+    accepted: "Accepted",
+    rejected: "Rejected",
+    nodeDetails: "Proxy Node validation",
   },
 } as const;
 
@@ -94,6 +102,7 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
   const [editingID, setEditingID] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [nodes, setNodes] = useState<Record<string, ProxyNode[]>>({});
 
   useEffect(() => {
     let active = true;
@@ -102,6 +111,8 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
       .then((response) => response.json())
       .then((items) => {
         if (active) setSubscriptions(items);
+        Promise.all(items.map((item: UpstreamSubscription) => fetch(`/api/upstream-subscriptions/${item.id}/nodes`).then(requireOK).then((response) => response.json().then((value: ProxyNode[]) => [item.id, value] as const))))
+          .then((values) => { if (active) setNodes(Object.fromEntries(values)); }).catch(() => undefined);
       })
       .catch(() => {
         if (active) setError(text.loadError);
@@ -151,6 +162,11 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
         throw new Error(result.error || text.actionError);
       }
       setSubscriptions((current) => editingID ? current.map((item) => item.id === result.id ? result : item) : [...current, result]);
+      const nodeResponse = await fetch(`/api/upstream-subscriptions/${result.id}/nodes`);
+      if (nodeResponse.ok) {
+        const nodeItems = await nodeResponse.json();
+        setNodes((current) => ({ ...current, [result.id]: nodeItems }));
+      }
       resetForm();
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : text.actionError);
@@ -188,6 +204,7 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
       const response = await fetch(`/api/upstream-subscriptions/${subscription.id}`, { method: "DELETE" });
       if (!response.ok) throw new Error(await errorMessage(response, text.actionError));
       setSubscriptions((current) => current.filter((item) => item.id !== subscription.id));
+      setNodes((current) => { const next = { ...current }; delete next[subscription.id]; return next; });
       if (editingID === subscription.id) resetForm();
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : text.actionError);
@@ -205,6 +222,13 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
       }
       const updated = await response.json();
       setSubscriptions((current) => current.map((item) => item.id === id ? updated : item));
+      if (endpoint.endsWith("/refresh")) {
+        const nodeResponse = await fetch(`/api/upstream-subscriptions/${id}/nodes`);
+        if (nodeResponse.ok) {
+          const nodeItems = await nodeResponse.json();
+          setNodes((current) => ({ ...current, [id]: nodeItems }));
+        }
+      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : text.actionError);
     }
@@ -298,6 +322,13 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
             </div>
             {subscription.url && <code className="sourceURL">{subscription.url}</code>}
             {subscription.lastError && <p className="sourceError" role="alert">{subscription.lastError}</p>}
+            {(nodes[subscription.id] || []).length > 0 && <div className="nodeResults">
+              <h4>{text.nodeDetails}</h4>
+              {nodes[subscription.id].map((node) => <div className={`nodeResult nodeResult--${node.state}`} key={node.name}>
+                <span>{node.name}</span><strong>{node.state === "accepted" ? text.accepted : text.rejected}</strong>
+                {node.reason && <small>{node.reason}</small>}
+              </div>)}
+            </div>}
             <div className="sourceActions">
               <button type="button" onClick={() => refresh(subscription)}>{text.refresh}</button>
               <button type="button" onClick={() => beginEdit(subscription)}>{text.edit}</button>

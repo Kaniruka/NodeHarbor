@@ -88,6 +88,20 @@ func NewMihomoKernel(executablePath string) MihomoKernel {
 }
 
 func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error {
+	return kernel.validateDocument(ctx, document, "publication")
+}
+
+func (kernel MihomoKernel) ValidateNode(ctx context.Context, node ProxyNode) error {
+	document, err := yaml.Marshal(struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}{Proxies: []map[string]any{node.Config}})
+	if err != nil {
+		return fmt.Errorf("serialize Proxy Node %q: %w", node.Name, err)
+	}
+	return kernel.validateDocument(ctx, document, fmt.Sprintf("Proxy Node %q", node.Name))
+}
+
+func (kernel MihomoKernel) validateDocument(ctx context.Context, document []byte, subject string) error {
 	if kernel.executablePath == "" {
 		return errors.New("Mihomo executable path is required")
 	}
@@ -105,7 +119,7 @@ func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error 
 	}
 	command := exec.CommandContext(ctx, kernel.executablePath, "-t", "-d", workingDirectory, "-f", configPath)
 	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("Mihomo rejected publication: %w: %s", err, output)
+		return fmt.Errorf("Mihomo rejected %s: %w: %s", subject, err, output)
 	}
 	return nil
 }

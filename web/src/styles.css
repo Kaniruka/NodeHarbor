@@ -418,3 +418,9 @@ button:focus-visible, a:focus-visible {
   .importTabs { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
   .primaryButton { width: 100%; }
 }
+.nodeResults { margin-top: 1rem; display: grid; gap: .45rem; }
+.nodeResults h4 { margin: 0; font-size: .9rem; }
+.nodeResult { display: grid; grid-template-columns: 1fr auto; gap: .2rem .75rem; padding: .55rem .7rem; border-radius: .5rem; background: var(--surface-muted, #f3f4f6); }
+.nodeResult small { grid-column: 1 / -1; color: var(--text-muted, #6b7280); overflow-wrap: anywhere; }
+.nodeResult--rejected { border-left: 3px solid #dc2626; }
+.nodeResult--accepted { border-left: 3px solid #16a34a; }

@@ -25,6 +25,28 @@ type ProxyNode struct {
 	Config map[string]any
 }
 
+// NodeValidator is implemented by the bundled kernel. It deliberately sits
+// beside Kernel so test doubles and older adapters can keep using whole-document
+// validation while production gets isolated node-level validation.
+type NodeValidator interface {
+	ValidateNode(context.Context, ProxyNode) error
+}
+
+type proxyNodeState string
+
+const (
+	proxyNodeAccepted proxyNodeState = "accepted"
+	proxyNodeRejected proxyNodeState = "rejected"
+)
+
+type evaluatedProxyNode struct {
+	Name         string         `json:"name"`
+	OriginalName string         `json:"originalName"`
+	Config       map[string]any `json:"config"`
+	State        proxyNodeState `json:"state"`
+	Reason       string         `json:"reason,omitempty"`
+}
+
 type ProbeResult struct {
 	ExitIdentity string
 	Latency      time.Duration
