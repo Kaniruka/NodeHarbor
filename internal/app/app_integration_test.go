@@ -176,9 +176,15 @@ func TestNodeValidationKeepsValidNodesWhenAnotherNodeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	var nodes []struct{ Name, State, Reason string }
+	var nodes []struct {
+		Name, State, Reason string
+		Rejection           struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"rejection"`
+	}
 	getJSON(t, server.URL+"/api/upstream-subscriptions/"+created.ID+"/nodes", &nodes)
-	if len(nodes) != 2 || nodes[0].Name != "[My Source] good" || nodes[0].State != "accepted" || nodes[1].State != "rejected" || !strings.Contains(nodes[1].Reason, "validation_failed") {
+	if len(nodes) != 2 || nodes[0].Name != "[My Source] good" || nodes[0].State != "accepted" || nodes[1].State != "rejected" || nodes[1].Rejection.Code != "validation_failed" || nodes[1].Rejection.Message != "unsupported protocol" || !strings.Contains(nodes[1].Reason, "validation_failed") {
 		t.Fatalf("nodes=%+v", nodes)
 	}
 }

@@ -17,7 +17,14 @@ type UpstreamSubscription = {
   lastError?: string;
 };
 
-type ProxyNode = { name: string; originalName: string; config: Record<string, unknown>; state: "accepted" | "rejected"; reason?: string };
+type ProxyNode = {
+  name: string;
+  originalName: string;
+  config: Record<string, unknown>;
+  state: "accepted" | "rejected";
+  reason?: string;
+  rejection?: { code: string; message: string };
+};
 
 const copy = {
   "zh-CN": {
@@ -326,7 +333,7 @@ export default function UpstreamSubscriptions({ locale }: { locale: Locale }) {
               <h4>{text.nodeDetails}</h4>
               {nodes[subscription.id].map((node) => <div className={`nodeResult nodeResult--${node.state}`} key={node.name}>
                 <span>{node.name}</span><strong>{node.state === "accepted" ? text.accepted : text.rejected}</strong>
-                {node.reason && <small>{node.reason}</small>}
+                {node.rejection ? <small>{node.rejection.code}: {node.rejection.message}</small> : node.reason && <small>{node.reason}</small>}
               </div>)}
             </div>}
             <div className="sourceActions">

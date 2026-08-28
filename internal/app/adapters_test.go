@@ -15,21 +15,29 @@ func TestMihomoKernelRejectsExecutableWithWrongPinnedDigest(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not the pinned core"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	kernel := app.NewMihomoKernelWithBuild(path, app.MihomoBuild{
-		Platform:          "test",
-		Version:           "v-test",
-		ExecutableSHA256:  strings.Repeat("0", 64),
-		ArchiveSHA256:     strings.Repeat("1", 64),
-		LicenseIdentifier: "GPL-3.0-or-later",
-	})
+	kernel := app.NewMihomoKernelWithBuild(path, app.KernelSUMihomoBuild)
 
 	err := kernel.Validate(context.Background(), []byte("proxies: []\n"))
-	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+	if err == nil || !strings.Contains(err.Error(), "android-arm64-v8") || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("Validate error = %v, want pinned digest mismatch", err)
 	}
 }
 
 func TestPinnedMihomoBuildsHaveTargetSpecificMetadata(t *testing.T) {
+	windows, err := app.MihomoBuildForPlatform("windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	android, err := app.MihomoBuildForPlatform("android")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.MihomoBuildForPlatform("linux"); err == nil {
+		t.Fatal("unsupported platform was accepted")
+	}
+	if windows.Platform != app.WindowsMihomoBuild.Platform || android.Platform != app.KernelSUMihomoBuild.Platform {
+		t.Fatalf("platform selection returned wrong metadata: windows=%+v android=%+v", windows, android)
+	}
 	if app.WindowsMihomoBuild.Platform == app.KernelSUMihomoBuild.Platform || app.WindowsMihomoBuild.ExecutableSHA256 == app.KernelSUMihomoBuild.ExecutableSHA256 {
 		t.Fatalf("target metadata is not platform-specific: windows=%+v kernelsu=%+v", app.WindowsMihomoBuild, app.KernelSUMihomoBuild)
 	}

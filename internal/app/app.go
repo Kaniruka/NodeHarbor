@@ -48,6 +48,12 @@ type evaluatedProxyNode struct {
 	Config       map[string]any `json:"config"`
 	State        proxyNodeState `json:"state"`
 	Reason       string         `json:"reason,omitempty"`
+	Rejection    *nodeRejection `json:"rejection,omitempty"`
+}
+
+type nodeRejection struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type ProbeResult struct {

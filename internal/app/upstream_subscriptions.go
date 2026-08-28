@@ -144,23 +144,24 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
 	}
-	occurrences := map[string]int{}
 	for _, node := range legacy {
 		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config)
 		if err != nil {
 			return fmt.Errorf("fingerprint legacy Proxy Node: %w", err)
 		}
-		occurrences[node.subscriptionID+"/"+fingerprint]++
-		newID := stableProxyNodeID(node.subscriptionID, fingerprint, occurrences[node.subscriptionID+"/"+fingerprint])
+		newID := stableProxyNodeID(node.subscriptionID, fingerprint)
+		if newID != node.id {
+			if _, err := tx.ExecContext(ctx, `SELECT 1 FROM proxy_nodes WHERE id = ?`, newID); err == nil {
+				newID += "-legacy-" + node.id
+			}
+		}
 		if newID != node.id {
 			if _, err := tx.ExecContext(ctx, `UPDATE evaluation_results SET node_id = ? WHERE node_id = ?`, newID, node.id); err != nil && !strings.Contains(err.Error(), "no such table") {
 				return fmt.Errorf("migrate evaluation result identity: %w", err)
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET id = ?, fingerprint = ? WHERE id = ?`, newID, fingerprint, node.id); err != nil {
-				return fmt.Errorf("migrate Proxy Node identity: %w", err)
-			}
-		} else if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET fingerprint = ? WHERE id = ?`, fingerprint, node.id); err != nil {
-			return fmt.Errorf("store Proxy Node fingerprint: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET id = ?, fingerprint = ? WHERE id = ?`, newID, fingerprint, node.id); err != nil {
+			return fmt.Errorf("migrate Proxy Node identity: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -500,6 +501,7 @@ type storedProxyNode struct {
 	Config         map[string]any
 	State          proxyNodeState
 	Reason         string
+	Rejection      *nodeRejection
 	CreatedAt      string
 }
 
@@ -515,7 +517,7 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 	if err := application.database.QueryRowContext(ctx, `SELECT name FROM upstream_subscriptions WHERE id = ?`, subscriptionID).Scan(&sourceName); err != nil {
 		return err
 	}
-	occurrences := map[string]int{}
+	seenFingerprints := map[string]bool{}
 	nodes := make([]storedProxyNode, 0, len(parsed.Proxies))
 	for index, config := range parsed.Proxies {
 		original, _ := config["name"].(string)
@@ -526,8 +528,11 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 		if err != nil {
 			return err
 		}
-		occurrences[fingerprint]++
-		id := stableProxyNodeID(subscriptionID, fingerprint, occurrences[fingerprint])
+		if seenFingerprints[fingerprint] {
+			continue
+		}
+		seenFingerprints[fingerprint] = true
+		id := stableProxyNodeID(subscriptionID, fingerprint)
 		validationConfig := cloneProxyNodeConfig(config)
 		validationName := fmt.Sprintf("[%s] %s", stableSourcePrefix(sourceName), original)
 		validationConfig["name"] = validationName
@@ -536,6 +541,7 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 			if err := validator.ValidateNode(ctx, ProxyNode{Name: validationName, Config: validationConfig}); err != nil {
 				node.State = proxyNodeRejected
 				node.Reason = structuredNodeReason(err)
+				node.Rejection = &nodeRejection{Code: "validation_failed", Message: err.Error()}
 			}
 		}
 		nodes = append(nodes, node)
@@ -625,9 +631,9 @@ func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
 			return group[left].SubscriptionID < group[right].SubscriptionID
 		})
 		for index, node := range group {
-			suffix := node.Fingerprint[:8]
+			suffix := node.Fingerprint
 			if index > 0 && group[index-1].Fingerprint == node.Fingerprint {
-				suffix += "-" + shortStableID(node.SubscriptionID)
+				suffix += "-" + node.SubscriptionID
 			}
 			result[node.ID] = base + " (" + suffix + ")"
 		}
@@ -635,18 +641,8 @@ func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
 	return result
 }
 
-func stableProxyNodeID(subscriptionID, fingerprint string, occurrence int) string {
-	if occurrence <= 1 {
-		return subscriptionID + "-" + fingerprint
-	}
-	return subscriptionID + "-" + fingerprint + "-duplicate-" + fmt.Sprint(occurrence)
-}
-
-func shortStableID(value string) string {
-	if len(value) <= 8 {
-		return value
-	}
-	return value[:8]
+func stableProxyNodeID(subscriptionID, fingerprint string) string {
+	return subscriptionID + "-" + fingerprint
 }
 
 func cloneProxyNodeConfig(config map[string]any) map[string]any {
@@ -686,6 +682,17 @@ func stableSourcePrefix(name string) string {
 
 func structuredNodeReason(err error) string { return "validation_failed: " + err.Error() }
 
+func rejectionFromReason(reason string) *nodeRejection {
+	if reason == "" {
+		return nil
+	}
+	const prefix = "validation_failed: "
+	if strings.HasPrefix(reason, prefix) {
+		return &nodeRejection{Code: "validation_failed", Message: strings.TrimPrefix(reason, prefix)}
+	}
+	return &nodeRejection{Code: "validation_failed", Message: reason}
+}
+
 func (application *Application) handleListProxyNodes(response http.ResponseWriter, request *http.Request) {
 	if _, err := application.getUpstreamSubscription(request.Context(), request.PathValue("id")); err != nil {
 		writeError(response, http.StatusNotFound, err)
@@ -708,6 +715,9 @@ func (application *Application) handleListProxyNodes(response http.ResponseWrite
 		if err := yaml.Unmarshal(config, &node.Config); err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return
+		}
+		if node.State == proxyNodeRejected {
+			node.Rejection = rejectionFromReason(node.Reason)
 		}
 		result = append(result, node)
 	}
