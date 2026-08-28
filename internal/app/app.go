@@ -119,11 +119,14 @@ type Config struct {
 }
 
 type Application struct {
-	database     *sql.DB
-	handler      http.Handler
-	dependencies Dependencies
-	evaluationMu sync.Mutex
-	runID        string
+	database      *sql.DB
+	handler       http.Handler
+	dependencies  Dependencies
+	evaluationMu  sync.Mutex
+	runID         string
+	pendingRun    bool
+	lifecycleCtx  context.Context
+	stopScheduler context.CancelFunc
 }
 
 type HealthComponent struct {
@@ -139,11 +142,13 @@ type healthResponse struct {
 }
 
 type settingsResponse struct {
-	Language         string `json:"language"`
-	InstallationID   string `json:"installationId"`
-	ScoringProvider  string `json:"scoringProvider"`
-	IPLarkThreshold  int    `json:"iplarkThreshold"`
-	IPCheckThreshold int    `json:"ipcheckThreshold"`
+	Language                  string `json:"language"`
+	InstallationID            string `json:"installationId"`
+	ScoringProvider           string `json:"scoringProvider"`
+	IPLarkThreshold           int    `json:"iplarkThreshold"`
+	IPCheckThreshold          int    `json:"ipcheckThreshold"`
+	EvaluationIntervalMinutes int    `json:"evaluationIntervalMinutes"`
+	HistoryRetentionDays      int    `json:"historyRetentionDays"`
 }
 
 func Open(ctx context.Context, config Config, dependencies Dependencies) (*Application, error) {
@@ -164,7 +169,8 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	application := &Application{database: database, dependencies: dependencies}
+	lifecycleCtx, stopScheduler := context.WithCancel(context.Background())
+	application := &Application{database: database, dependencies: dependencies, lifecycleCtx: lifecycleCtx, stopScheduler: stopScheduler}
 	if err := application.initialize(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -175,7 +181,12 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 
 func (application *Application) Handler() http.Handler { return application.handler }
 
-func (application *Application) Close() error { return application.database.Close() }
+func (application *Application) Close() error {
+	if application.stopScheduler != nil {
+		application.stopScheduler()
+	}
+	return application.database.Close()
+}
 
 func (application *Application) initialize(ctx context.Context) error {
 	statements := []string{
@@ -191,7 +202,7 @@ func (application *Application) initialize(ctx context.Context) error {
 	if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES ('language', 'auto')`); err != nil {
 		return fmt.Errorf("initialize language: %w", err)
 	}
-	for key, value := range map[string]string{"scoring_provider": "iplark", "iplark_threshold": "70", "ipcheck_threshold": "70"} {
+	for key, value := range map[string]string{"scoring_provider": "iplark", "iplark_threshold": "70", "ipcheck_threshold": "70", "evaluation_interval_minutes": "360", "history_retention_days": "7"} {
 		if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)`, key, value); err != nil {
 			return fmt.Errorf("initialize scoring setting: %w", err)
 		}
@@ -209,6 +220,7 @@ func (application *Application) initialize(ctx context.Context) error {
 	if err := application.initializeEvaluationRuns(ctx); err != nil {
 		return err
 	}
+	go application.runScheduler()
 	return application.ensureInitialPublication(ctx)
 }
 
@@ -279,10 +291,12 @@ func (application *Application) handleGetSettings(response http.ResponseWriter, 
 
 func (application *Application) handlePutSettings(response http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Language         string `json:"language"`
-		ScoringProvider  string `json:"scoringProvider"`
-		IPLarkThreshold  *int   `json:"iplarkThreshold"`
-		IPCheckThreshold *int   `json:"ipcheckThreshold"`
+		Language                  string `json:"language"`
+		ScoringProvider           string `json:"scoringProvider"`
+		IPLarkThreshold           *int   `json:"iplarkThreshold"`
+		IPCheckThreshold          *int   `json:"ipcheckThreshold"`
+		EvaluationIntervalMinutes *int   `json:"evaluationIntervalMinutes"`
+		HistoryRetentionDays      *int   `json:"historyRetentionDays"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -300,7 +314,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipcheck"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -309,8 +323,18 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			if number == nil {
 				continue
 			}
-			if *number < 0 || *number > 100 {
-				writeError(response, http.StatusBadRequest, errors.New("score thresholds must be between 0 and 100"))
+			valid := *number >= 0 && *number <= 100
+			message := "score thresholds must be between 0 and 100"
+			if name == "evaluation_interval_minutes" {
+				valid = *number >= 0 && *number <= 10080
+				message = "evaluation interval must be between 0 and 10080 minutes"
+			}
+			if name == "history_retention_days" {
+				valid = *number >= 3 && *number <= 7
+				message = "history retention must be between 3 and 7 days"
+			}
+			if !valid {
+				writeError(response, http.StatusBadRequest, errors.New(message))
 				return
 			}
 			stored = fmt.Sprint(*number)
@@ -338,6 +362,12 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 		return result, err
 	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipcheck_threshold'`).Scan(&result.IPCheckThreshold); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'evaluation_interval_minutes'`).Scan(&result.EvaluationIntervalMinutes); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'history_retention_days'`).Scan(&result.HistoryRetentionDays); err != nil {
 		return result, err
 	}
 	return result, nil

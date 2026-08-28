@@ -92,40 +92,68 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 
 func (application *Application) registerEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/evaluation-runs", application.handleStartEvaluationRun)
+	mux.HandleFunc("GET /api/evaluation-runs", application.handleListEvaluationRuns)
 	mux.HandleFunc("GET /api/evaluation-runs/current", application.handleCurrentEvaluationRun)
 	mux.HandleFunc("GET /api/evaluation-runs/{id}", application.handleGetEvaluationRun)
 }
 
-func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, r *http.Request) {
-	application.evaluationMu.Lock()
-	if application.runID != "" {
-		id := application.runID
-		application.evaluationMu.Unlock()
-		run, err := application.readEvaluationRun(r.Context(), id)
-		if err != nil {
+func (application *Application) handleListEvaluationRuns(w http.ResponseWriter, r *http.Request) {
+	rows, err := application.database.QueryContext(r.Context(), `SELECT id, status, started_at, finished_at, total, passed, failed FROM evaluation_runs ORDER BY started_at DESC LIMIT 50`)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	defer rows.Close()
+	result := make([]evaluationRunResponse, 0)
+	for rows.Next() {
+		var run evaluationRun
+		if err := rows.Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed); err != nil {
 			writeError(w, 500, err)
 			return
 		}
-		writeJSON(w, http.StatusAccepted, run)
+		result = append(result, application.runResponse(r.Context(), run))
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, err)
 		return
+	}
+	writeJSON(w, 200, result)
+}
+
+func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, r *http.Request) {
+	run, accepted, err := application.startEvaluationRun(r.Context())
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+	_ = accepted
+}
+
+func (application *Application) startEvaluationRun(ctx context.Context) (evaluationRunResponse, bool, error) {
+	application.evaluationMu.Lock()
+	if application.runID != "" {
+		id := application.runID
+		application.pendingRun = true
+		application.evaluationMu.Unlock()
+		run, err := application.readEvaluationRun(ctx, id)
+		return run, false, err
 	}
 	id, err := randomID()
 	if err != nil {
 		application.evaluationMu.Unlock()
-		writeError(w, 500, err)
-		return
+		return evaluationRunResponse{}, false, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = application.database.ExecContext(r.Context(), `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, id, now); err != nil {
+	if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, id, now); err != nil {
 		application.evaluationMu.Unlock()
-		writeError(w, 500, err)
-		return
+		return evaluationRunResponse{}, false, err
 	}
 	application.runID = id
 	application.evaluationMu.Unlock()
 	go application.executeEvaluationRun(context.Background(), id)
-	run, _ := application.readEvaluationRun(r.Context(), id)
-	writeJSON(w, http.StatusAccepted, run)
+	run, err := application.readEvaluationRun(ctx, id)
+	return run, true, err
 }
 
 func (application *Application) handleCurrentEvaluationRun(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +220,26 @@ func (application *Application) runResponse(ctx context.Context, run evaluationR
 }
 
 func (application *Application) executeEvaluationRun(ctx context.Context, id string) {
-	defer func() { application.evaluationMu.Lock(); application.runID = ""; application.evaluationMu.Unlock() }()
+	defer func() {
+		application.cleanupEvaluationHistory(ctx)
+		application.evaluationMu.Lock()
+		pending := application.pendingRun
+		application.pendingRun = false
+		if pending {
+			nextID, err := randomID()
+			if err == nil {
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, nextID, now); err == nil {
+					application.runID = nextID
+					application.evaluationMu.Unlock()
+					go application.executeEvaluationRun(context.Background(), nextID)
+					return
+				}
+			}
+		}
+		application.runID = ""
+		application.evaluationMu.Unlock()
+	}()
 	nodes, err := application.evaluationNodes(ctx)
 	if err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
@@ -216,6 +263,39 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		}
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) runScheduler() {
+	for {
+		minutes := 360
+		_ = application.database.QueryRowContext(application.lifecycleCtx, `SELECT value FROM settings WHERE key = 'evaluation_interval_minutes'`).Scan(&minutes)
+		if minutes <= 0 {
+			select {
+			case <-application.lifecycleCtx.Done():
+				return
+			case <-time.After(time.Minute):
+				continue
+			}
+		}
+		timer := time.NewTimer(time.Duration(minutes) * time.Minute)
+		select {
+		case <-application.lifecycleCtx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			_, _, _ = application.startEvaluationRun(application.lifecycleCtx)
+		}
+	}
+}
+
+func (application *Application) cleanupEvaluationHistory(ctx context.Context) {
+	days := 7
+	_ = application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'history_retention_days'`).Scan(&days)
+	if days < 3 || days > 7 {
+		days = 7
+	}
+	_, _ = application.database.ExecContext(ctx, `DELETE FROM evaluation_results WHERE run_id IN (SELECT id FROM evaluation_runs WHERE julianday(started_at) < julianday('now', ?))`, fmt.Sprintf("-%d days", days))
+	_, _ = application.database.ExecContext(ctx, `DELETE FROM evaluation_runs WHERE julianday(started_at) < julianday('now', ?)`, fmt.Sprintf("-%d days", days))
 }
 
 func (application *Application) publishQualifiedNodes(ctx context.Context, runID string) error {
