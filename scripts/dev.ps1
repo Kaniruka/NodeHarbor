@@ -22,6 +22,11 @@ if (-not (Test-Path -LiteralPath $corePath)) {
     Expand-Archive -LiteralPath $archive -DestinationPath $binDirectory -Force
     Move-Item -LiteralPath (Join-Path $binDirectory 'mihomo-windows-amd64.exe') -Destination $corePath
 }
+$actualCoreDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $corePath).Hash
+$expectedCoreDigest = 'F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761'
+if ($actualCoreDigest -ne $expectedCoreDigest) {
+    throw "Mihomo executable checksum mismatch: $actualCoreDigest"
+}
 
 Push-Location (Join-Path $projectRoot 'web')
 try {
@@ -34,7 +39,8 @@ finally {
 
 Push-Location $projectRoot
 try {
-    go run ./cmd/nodeharbor --listen $Listen --data $Data --mihomo $corePath
+    go build -o (Join-Path $binDirectory 'nodeharbor.exe') ./cmd/nodeharbor
+    & (Join-Path $binDirectory 'nodeharbor.exe') --listen $Listen --data $Data
 }
 finally {
     Pop-Location

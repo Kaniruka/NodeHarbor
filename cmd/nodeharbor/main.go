@@ -30,7 +30,6 @@ func main() {
 func run() error {
 	listenAddress := flag.String("listen", "127.0.0.1:9876", "HTTP listen address")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
-	mihomoPath := flag.String("mihomo", defaultMihomoPath(), "path to the NodeHarbor-owned Mihomo executable")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	flag.Parse()
 
@@ -41,7 +40,7 @@ func run() error {
 	application, err := app.Open(context.Background(), app.Config{
 		DatabasePath: filepath.Join(*dataDirectory, "nodeharbor.db"),
 		WebAssets:    assets,
-	}, app.DefaultDependencies(app.MihomoKernel{ExecutablePath: *mihomoPath}))
+	}, app.DefaultDependencies(app.NewMihomoKernel(defaultMihomoPath())))
 	if err != nil {
 		return err
 	}

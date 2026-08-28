@@ -148,7 +148,7 @@ func TestInitialPublishedSubscriptionPassesMihomoValidation(t *testing.T) {
 	if mihomoPath == "" {
 		t.Skip("NODEHARBOR_TEST_MIHOMO is not set")
 	}
-	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), app.MihomoKernel{ExecutablePath: mihomoPath})
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), app.NewMihomoKernel(mihomoPath))
 	server := httptest.NewServer(instance.Handler())
 	t.Cleanup(server.Close)
 	response, err := http.Get(server.URL + "/sub/clash.yaml")

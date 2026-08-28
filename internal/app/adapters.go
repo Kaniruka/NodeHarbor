@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -73,12 +76,22 @@ func (StructuralYAMLValidator) Validate(_ context.Context, document []byte) erro
 // MihomoKernel validates a publication with the exact NodeHarbor-owned Mihomo
 // executable configured by the platform assembly.
 type MihomoKernel struct {
-	ExecutablePath string
+	executablePath string
+}
+
+const MihomoVersion = "v1.19.30"
+const MihomoExecutableSHA256 = "F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761"
+
+func NewMihomoKernel(executablePath string) MihomoKernel {
+	return MihomoKernel{executablePath: executablePath}
 }
 
 func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error {
-	if kernel.ExecutablePath == "" {
+	if kernel.executablePath == "" {
 		return errors.New("Mihomo executable path is required")
+	}
+	if err := verifyMihomoExecutable(kernel.executablePath); err != nil {
+		return err
 	}
 	workingDirectory, err := os.MkdirTemp("", "nodeharbor-mihomo-validation-")
 	if err != nil {
@@ -89,9 +102,26 @@ func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error 
 	if err := os.WriteFile(configPath, document, 0o600); err != nil {
 		return fmt.Errorf("write Mihomo validation input: %w", err)
 	}
-	command := exec.CommandContext(ctx, kernel.ExecutablePath, "-t", "-d", workingDirectory, "-f", configPath)
+	command := exec.CommandContext(ctx, kernel.executablePath, "-t", "-d", workingDirectory, "-f", configPath)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("Mihomo rejected publication: %w: %s", err, output)
+	}
+	return nil
+}
+
+func verifyMihomoExecutable(path string) error {
+	executable, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open pinned Mihomo %s executable: %w", MihomoVersion, err)
+	}
+	defer executable.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, executable); err != nil {
+		return fmt.Errorf("hash pinned Mihomo executable: %w", err)
+	}
+	actual := strings.ToUpper(fmt.Sprintf("%x", hash.Sum(nil)))
+	if actual != MihomoExecutableSHA256 {
+		return fmt.Errorf("Mihomo executable digest mismatch: got %s, want %s", actual, MihomoExecutableSHA256)
 	}
 	return nil
 }
