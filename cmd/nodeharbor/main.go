@@ -6,10 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -27,6 +30,8 @@ func main() {
 func run() error {
 	listenAddress := flag.String("listen", "127.0.0.1:9876", "HTTP listen address")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
+	mihomoPath := flag.String("mihomo", defaultMihomoPath(), "path to the NodeHarbor-owned Mihomo executable")
+	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	flag.Parse()
 
 	assets, err := webassets.Assets()
@@ -36,7 +41,7 @@ func run() error {
 	application, err := app.Open(context.Background(), app.Config{
 		DatabasePath: filepath.Join(*dataDirectory, "nodeharbor.db"),
 		WebAssets:    assets,
-	}, app.DefaultDependencies())
+	}, app.DefaultDependencies(app.MihomoKernel{ExecutablePath: *mihomoPath}))
 	if err != nil {
 		return err
 	}
@@ -57,9 +62,34 @@ func run() error {
 		_ = server.Shutdown(shutdownContext)
 	}()
 
-	log.Printf("NodeHarbor is available at http://%s", *listenAddress)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	listener, err := net.Listen("tcp", *listenAddress)
+	if err != nil {
+		return fmt.Errorf("listen for HTTP: %w", err)
+	}
+	managementURL := "http://" + listener.Addr().String()
+	log.Printf("NodeHarbor is available at %s", managementURL)
+	if *launchBrowser {
+		if err := openBrowser(managementURL); err != nil {
+			log.Printf("could not open the browser: %v", err)
+		}
+	}
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
 	return nil
+}
+
+func defaultMihomoPath() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return "nodeharbor-core.exe"
+	}
+	return filepath.Join(filepath.Dir(executable), "nodeharbor-core.exe")
+}
+
+func openBrowser(url string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }

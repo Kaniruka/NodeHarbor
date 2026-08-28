@@ -54,8 +54,9 @@ type Dependencies struct {
 }
 
 type Config struct {
-	DatabasePath string
-	WebAssets    fs.FS
+	DatabasePath        string
+	WebAssets           fs.FS
+	EnableTestEndpoints bool
 }
 
 type Application struct {
@@ -104,7 +105,7 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 		_ = database.Close()
 		return nil, err
 	}
-	application.handler = application.routes(config.WebAssets)
+	application.handler = application.routes(config)
 	return application, nil
 }
 
@@ -158,13 +159,16 @@ func initialPublishedSubscription() []byte {
 	return []byte("proxies: []\nproxy-groups:\n  - name: AUTO\n    type: url-test\n    proxies: [DIRECT]\n    url: https://www.gstatic.com/generate_204\n    interval: 300\n  - name: FALLBACK\n    type: fallback\n    proxies: [DIRECT]\n    url: https://www.gstatic.com/generate_204\n    interval: 300\n  - name: SELECT\n    type: select\n    proxies: [AUTO, FALLBACK, DIRECT]\n")
 }
 
-func (application *Application) routes(webAssets fs.FS) http.Handler {
+func (application *Application) routes(config Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", application.handleHealth)
 	mux.HandleFunc("GET /api/settings", application.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", application.handlePutSettings)
 	mux.HandleFunc("GET /sub/clash.yaml", application.handlePublishedSubscription)
-	mux.Handle("/", http.FileServer(http.FS(webAssets)))
+	if config.EnableTestEndpoints {
+		mux.HandleFunc("POST /_test/evaluation", application.handleTestEvaluation)
+	}
+	mux.Handle("/", http.FileServer(http.FS(config.WebAssets)))
 	return loopbackManagementOnly(mux)
 }
 

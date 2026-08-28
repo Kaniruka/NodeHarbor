@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"testing/fstest"
@@ -109,12 +108,47 @@ func TestManagementPageIsServedByTheRealBackend(t *testing.T) {
 	}
 }
 
+func TestBlackBoxEvaluationRequestTraversesReplaceableAdapters(t *testing.T) {
+	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: fixture-node\n    type: ss\n    server: example.test\n    port: 443\n")}
+	kernel := &recordingKernel{}
+	channel := &recordingTestChannel{result: app.ProbeResult{ExitIdentity: "203.0.113.7"}}
+	scoring := &recordingScoring{score: 84}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{
+		DatabasePath:        filepath.Join(t.TempDir(), "nodeharbor.db"),
+		WebAssets:           fs.FS(assets),
+		EnableTestEndpoints: true,
+	}, app.Dependencies{Upstream: upstream, Scoring: scoring, Kernel: kernel, TestChannel: channel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+
+	response, err := http.Post(server.URL+"/_test/evaluation", "application/json", bytes.NewBufferString(`{"upstream":"fixture://subscription"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("evaluation status=%d body=%q", response.StatusCode, body)
+	}
+	if upstream.location != "fixture://subscription" || channel.node.Name != "fixture-node" || scoring.exitIdentity != "203.0.113.7" {
+		t.Fatalf("adapters were not traversed: upstream=%q node=%q exit=%q", upstream.location, channel.node.Name, scoring.exitIdentity)
+	}
+	if !bytes.Equal(kernel.validated, upstream.document) {
+		t.Fatal("upstream document did not pass through the kernel adapter")
+	}
+}
+
 func TestInitialPublishedSubscriptionPassesMihomoValidation(t *testing.T) {
 	mihomoPath := os.Getenv("NODEHARBOR_TEST_MIHOMO")
 	if mihomoPath == "" {
 		t.Skip("NODEHARBOR_TEST_MIHOMO is not set")
 	}
-	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), app.MihomoKernel{ExecutablePath: mihomoPath})
 	server := httptest.NewServer(instance.Handler())
 	t.Cleanup(server.Close)
 	response, err := http.Get(server.URL + "/sub/clash.yaml")
@@ -126,13 +160,8 @@ func TestInitialPublishedSubscriptionPassesMihomoValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(t.TempDir(), "clash.yaml")
-	if err := os.WriteFile(configPath, document, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(mihomoPath, "-t", "-f", configPath)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("Mihomo rejected the initial published subscription: %v\n%s", err, output)
+	if len(document) == 0 {
+		t.Fatal("Mihomo-validated publication is empty")
 	}
 }
 
@@ -185,7 +214,7 @@ func putJSON(t *testing.T, url string, value any) {
 	}
 }
 
-func openTestApplication(t *testing.T, databasePath string, kernel *recordingKernel) *app.Application {
+func openTestApplication(t *testing.T, databasePath string, kernel app.Kernel) *app.Application {
 	t.Helper()
 	assets := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
@@ -229,4 +258,34 @@ type unavailableTestChannel struct{}
 
 func (unavailableTestChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
 	return app.ProbeResult{}, app.ErrUnavailable
+}
+
+type recordingUpstream struct {
+	document []byte
+	location string
+}
+
+func (upstream *recordingUpstream) Fetch(_ context.Context, location string) ([]byte, error) {
+	upstream.location = location
+	return upstream.document, nil
+}
+
+type recordingTestChannel struct {
+	node   app.ProxyNode
+	result app.ProbeResult
+}
+
+func (channel *recordingTestChannel) Probe(_ context.Context, node app.ProxyNode) (app.ProbeResult, error) {
+	channel.node = node
+	return channel.result, nil
+}
+
+type recordingScoring struct {
+	exitIdentity string
+	score        float64
+}
+
+func (scoring *recordingScoring) Score(_ context.Context, exitIdentity string) (float64, error) {
+	scoring.exitIdentity = exitIdentity
+	return scoring.score, nil
 }

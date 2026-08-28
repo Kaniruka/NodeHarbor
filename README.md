@@ -12,7 +12,7 @@ Requirements: Go 1.24 or newer and Node.js 24 or newer.
 .\scripts\dev.ps1
 ```
 
-Then open <http://127.0.0.1:9876>. The initial subscription is available at <http://127.0.0.1:9876/sub/clash.yaml>, including when there are no Proxy Nodes. Runtime state is stored under `data/` by default.
+The script downloads the pinned Mihomo v1.19.30 Windows build on first run, verifies its SHA-256 digest, starts NodeHarbor, and opens <http://127.0.0.1:9876> in the default browser. The initial subscription is available at <http://127.0.0.1:9876/sub/clash.yaml>, including when there are no Proxy Nodes. Runtime state is stored under `data/` by default.
 
 To use a different address or state directory:
 
@@ -34,7 +34,7 @@ go vet ./...
 go build ./cmd/nodeharbor
 ```
 
-The integration suite starts the real HTTP backend with a temporary SQLite database. Its `Upstream`, `ScoringProvider`, `Kernel`, and `TestChannel` adapters can be replaced from the application assembly seam. CI additionally downloads the pinned Mihomo v1.19.30 Windows build, verifies its SHA-256 digest, and uses it to validate the generated empty subscription.
+The integration suite starts the real HTTP backend with a temporary SQLite database. Its test-only black-box evaluation endpoint proves that one request can traverse replaceable `Upstream`, `ScoringProvider`, `Kernel`, and `TestChannel` adapters. CI additionally downloads the pinned Mihomo v1.19.30 Windows build, verifies its SHA-256 digest, and uses the production Mihomo adapter to validate the generated empty subscription.
 
 ## Design documents
 

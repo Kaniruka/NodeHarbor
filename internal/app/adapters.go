@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
 
-func DefaultDependencies() Dependencies {
+func DefaultDependencies(kernel Kernel) Dependencies {
 	return Dependencies{
 		Upstream:    UnavailableUpstream{},
 		Scoring:     UnavailableScoringProvider{},
-		Kernel:      YAMLKernel{},
+		Kernel:      kernel,
 		TestChannel: UnavailableTestChannel{},
 	}
 }
@@ -35,13 +38,11 @@ func (UnavailableTestChannel) Probe(context.Context, ProxyNode) (ProbeResult, er
 	return ProbeResult{}, ErrUnavailable
 }
 
-// YAMLKernel is the development adapter used before a bundled Mihomo executable
-// is supplied by platform packaging. It checks the structural invariants needed
-// by NodeHarbor's initial publication; release adapters can replace it with an
-// isolated Mihomo process without changing the application interface.
-type YAMLKernel struct{}
+// StructuralYAMLValidator is a lightweight adapter for tests that do not need
+// to start Mihomo. Production assembly uses MihomoKernel.
+type StructuralYAMLValidator struct{}
 
-func (YAMLKernel) Validate(_ context.Context, document []byte) error {
+func (StructuralYAMLValidator) Validate(_ context.Context, document []byte) error {
 	var subscription struct {
 		Proxies []map[string]any `yaml:"proxies"`
 		Groups  []struct {
@@ -65,6 +66,32 @@ func (YAMLKernel) Validate(_ context.Context, document []byte) error {
 		if group.Name != expected.name || group.Type != expected.kind || len(group.Proxies) == 0 {
 			return fmt.Errorf("invalid %s proxy group", expected.name)
 		}
+	}
+	return nil
+}
+
+// MihomoKernel validates a publication with the exact NodeHarbor-owned Mihomo
+// executable configured by the platform assembly.
+type MihomoKernel struct {
+	ExecutablePath string
+}
+
+func (kernel MihomoKernel) Validate(ctx context.Context, document []byte) error {
+	if kernel.ExecutablePath == "" {
+		return errors.New("Mihomo executable path is required")
+	}
+	workingDirectory, err := os.MkdirTemp("", "nodeharbor-mihomo-validation-")
+	if err != nil {
+		return fmt.Errorf("create Mihomo validation directory: %w", err)
+	}
+	defer os.RemoveAll(workingDirectory)
+	configPath := filepath.Join(workingDirectory, "clash.yaml")
+	if err := os.WriteFile(configPath, document, 0o600); err != nil {
+		return fmt.Errorf("write Mihomo validation input: %w", err)
+	}
+	command := exec.CommandContext(ctx, kernel.ExecutablePath, "-t", "-d", workingDirectory, "-f", configPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("Mihomo rejected publication: %w: %s", err, output)
 	}
 	return nil
 }
