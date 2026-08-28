@@ -277,7 +277,7 @@ func (application *Application) finishEvaluationRun(ctx context.Context, id stri
 }
 
 func (application *Application) evaluationNodes(ctx context.Context) ([]evaluationNode, error) {
-	rows, err := application.database.QueryContext(ctx, `SELECT p.id, p.name, p.config FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.state = 'accepted' AND s.enabled = 1 ORDER BY p.id`)
+	rows, err := application.database.QueryContext(ctx, `SELECT p.id, p.name, p.config FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.state = 'accepted' AND s.enabled = 1 AND julianday(s.last_success_at) >= julianday('now', '-7 days') ORDER BY p.id`)
 	if err != nil {
 		return nil, err
 	}
