@@ -81,9 +81,11 @@ func run() error {
 func defaultMihomoPath() string {
 	executable, err := os.Executable()
 	if err != nil {
-		return "nodeharbor-core.exe"
+		if runtime.GOOS == "windows" { return "nodeharbor-core.exe" }; return "nodeharbor-core"
 	}
-	return filepath.Join(filepath.Dir(executable), "nodeharbor-core.exe")
+	coreName := "nodeharbor-core"
+	if runtime.GOOS == "windows" { coreName += ".exe" }
+	return filepath.Join(filepath.Dir(executable), coreName)
 }
 
 func openBrowser(url string) error {

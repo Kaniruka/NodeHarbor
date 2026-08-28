@@ -1,0 +1,6 @@
+id=nodeharbor
+name=NodeHarbor
+version=0.2.0
+versionCode=20
+author=Kaniruka
+description=Isolated NodeHarbor proxy subscription curator daemon and WebUI
