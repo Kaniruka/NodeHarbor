@@ -121,18 +121,19 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 		return fmt.Errorf("begin Proxy Node identity migration: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, subscription_id, config FROM proxy_nodes WHERE fingerprint = ''`)
+	rows, err := tx.QueryContext(ctx, `SELECT id, subscription_id, original_name, config FROM proxy_nodes WHERE fingerprint = ''`)
 	if err != nil {
 		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
 	}
 	type legacyNode struct {
 		id, subscriptionID string
+		originalName       string
 		config             []byte
 	}
 	legacy := make([]legacyNode, 0)
 	for rows.Next() {
 		var node legacyNode
-		if err := rows.Scan(&node.id, &node.subscriptionID, &node.config); err != nil {
+		if err := rows.Scan(&node.id, &node.subscriptionID, &node.originalName, &node.config); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan legacy Proxy Node identity: %w", err)
 		}
@@ -144,15 +145,22 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
 	}
+	occurrences := map[string]int{}
 	for _, node := range legacy {
-		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config)
+		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config, node.originalName)
 		if err != nil {
 			return fmt.Errorf("fingerprint legacy Proxy Node: %w", err)
 		}
-		newID := stableProxyNodeID(node.subscriptionID, fingerprint)
+		occurrenceKey := node.subscriptionID + "/" + fingerprint
+		occurrences[occurrenceKey]++
+		newID := stableProxyNodeID(node.subscriptionID, fingerprint, occurrences[occurrenceKey])
 		if newID != node.id {
-			if _, err := tx.ExecContext(ctx, `SELECT 1 FROM proxy_nodes WHERE id = ?`, newID); err == nil {
+			var existingID string
+			existingErr := tx.QueryRowContext(ctx, `SELECT id FROM proxy_nodes WHERE id = ?`, newID).Scan(&existingID)
+			if existingErr == nil {
 				newID += "-legacy-" + node.id
+			} else if !errors.Is(existingErr, sql.ErrNoRows) {
+				return fmt.Errorf("check migrated Proxy Node identity: %w", existingErr)
 			}
 		}
 		if newID != node.id {
@@ -501,7 +509,6 @@ type storedProxyNode struct {
 	Config         map[string]any
 	State          proxyNodeState
 	Reason         string
-	Rejection      *nodeRejection
 	CreatedAt      string
 }
 
@@ -517,7 +524,7 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 	if err := application.database.QueryRowContext(ctx, `SELECT name FROM upstream_subscriptions WHERE id = ?`, subscriptionID).Scan(&sourceName); err != nil {
 		return err
 	}
-	seenFingerprints := map[string]bool{}
+	occurrences := map[string]int{}
 	nodes := make([]storedProxyNode, 0, len(parsed.Proxies))
 	for index, config := range parsed.Proxies {
 		original, _ := config["name"].(string)
@@ -528,11 +535,8 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 		if err != nil {
 			return err
 		}
-		if seenFingerprints[fingerprint] {
-			continue
-		}
-		seenFingerprints[fingerprint] = true
-		id := stableProxyNodeID(subscriptionID, fingerprint)
+		occurrences[fingerprint]++
+		id := stableProxyNodeID(subscriptionID, fingerprint, occurrences[fingerprint])
 		validationConfig := cloneProxyNodeConfig(config)
 		validationName := fmt.Sprintf("[%s] %s", stableSourcePrefix(sourceName), original)
 		validationConfig["name"] = validationName
@@ -541,7 +545,6 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 			if err := validator.ValidateNode(ctx, ProxyNode{Name: validationName, Config: validationConfig}); err != nil {
 				node.State = proxyNodeRejected
 				node.Reason = structuredNodeReason(err)
-				node.Rejection = &nodeRejection{Code: "validation_failed", Message: err.Error()}
 			}
 		}
 		nodes = append(nodes, node)
@@ -598,7 +601,7 @@ func (application *Application) loadStoredProxyNodes(ctx context.Context, tx *sq
 		}
 		if node.Fingerprint == "" {
 			var err error
-			node.Fingerprint, err = normalizedNodeFingerprintFromYAML(config)
+			node.Fingerprint, err = normalizedNodeFingerprintFromYAML(config, node.OriginalName)
 			if err != nil {
 				return nil, err
 			}
@@ -630,19 +633,38 @@ func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
 			}
 			return group[left].SubscriptionID < group[right].SubscriptionID
 		})
-		for index, node := range group {
+		fingerprintCounts := map[string]int{}
+		for _, node := range group {
+			fingerprintCounts[node.Fingerprint]++
+		}
+		for _, node := range group {
 			suffix := node.Fingerprint
-			if index > 0 && group[index-1].Fingerprint == node.Fingerprint {
+			if fingerprintCounts[node.Fingerprint] > 1 {
 				suffix += "-" + node.SubscriptionID
 			}
 			result[node.ID] = base + " (" + suffix + ")"
 		}
 	}
+	used := map[string][]string{}
+	for id, name := range result {
+		used[name] = append(used[name], id)
+	}
+	for name, ids := range used {
+		if len(ids) < 2 {
+			continue
+		}
+		for _, id := range ids {
+			result[id] = name + " [" + id + "]"
+		}
+	}
 	return result
 }
 
-func stableProxyNodeID(subscriptionID, fingerprint string) string {
-	return subscriptionID + "-" + fingerprint
+func stableProxyNodeID(subscriptionID, fingerprint string, occurrence int) string {
+	if occurrence <= 1 {
+		return subscriptionID + "-" + fingerprint
+	}
+	return subscriptionID + "-" + fingerprint + "-duplicate-" + fmt.Sprint(occurrence)
 }
 
 func cloneProxyNodeConfig(config map[string]any) map[string]any {
@@ -655,7 +677,6 @@ func cloneProxyNodeConfig(config map[string]any) map[string]any {
 
 func normalizedNodeFingerprint(config map[string]any) (string, error) {
 	canonical := cloneProxyNodeConfig(config)
-	delete(canonical, "name")
 	data, err := yaml.Marshal(canonical)
 	if err != nil {
 		return "", err
@@ -664,10 +685,13 @@ func normalizedNodeFingerprint(config map[string]any) (string, error) {
 	return fmt.Sprintf("%x", digest[:]), nil
 }
 
-func normalizedNodeFingerprintFromYAML(config []byte) (string, error) {
+func normalizedNodeFingerprintFromYAML(config []byte, originalName string) (string, error) {
 	var parsed map[string]any
 	if err := yaml.Unmarshal(config, &parsed); err != nil {
 		return "", err
+	}
+	if originalName != "" {
+		parsed["name"] = originalName
 	}
 	return normalizedNodeFingerprint(parsed)
 }
