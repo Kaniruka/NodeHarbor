@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -50,6 +51,28 @@ type evaluatedProxyNode struct {
 type ProbeResult struct {
 	ExitIdentity string
 	Latency      time.Duration
+}
+
+const (
+	DefaultAvailabilityAttempts   = 3
+	DefaultAvailabilityTimeout    = 5 * time.Second
+	DefaultAvailabilityMaxLatency = 1500 * time.Millisecond
+)
+
+var DefaultAvailabilityURLs = []string{
+	"https://www.gstatic.com/generate_204",
+	"https://cp.cloudflare.com/generate_204",
+}
+
+type AvailabilityAttempt struct {
+	Success      bool
+	Verified     bool
+	Latency      time.Duration
+	ExitIdentity string
+}
+
+type AvailabilityChannel interface {
+	ProbeAttempt(context.Context, ProxyNode, string) (AvailabilityAttempt, error)
 }
 
 type UpstreamRequest struct {
@@ -90,6 +113,8 @@ type Application struct {
 	database     *sql.DB
 	handler      http.Handler
 	dependencies Dependencies
+	evaluationMu sync.Mutex
+	runID        string
 }
 
 type HealthComponent struct {
@@ -164,6 +189,9 @@ func (application *Application) initialize(ctx context.Context) error {
 	if err := application.initializeUpstreamSubscriptions(ctx); err != nil {
 		return err
 	}
+	if err := application.initializeEvaluationRuns(ctx); err != nil {
+		return err
+	}
 	return application.ensureInitialPublication(ctx)
 }
 
@@ -196,6 +224,7 @@ func (application *Application) routes(config Config) http.Handler {
 	mux.HandleFunc("PUT /api/settings", application.handlePutSettings)
 	mux.HandleFunc("GET /sub/clash.yaml", application.handlePublishedSubscription)
 	application.registerUpstreamSubscriptionRoutes(mux)
+	application.registerEvaluationRoutes(mux)
 	if config.EnableTestEndpoints {
 		mux.HandleFunc("POST /_test/evaluation", application.handleTestEvaluation)
 	}

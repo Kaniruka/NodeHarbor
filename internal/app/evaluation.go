@@ -1,0 +1,263 @@
+package app
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type evaluationRun struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	StartedAt  string `json:"startedAt"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Total      int    `json:"total"`
+	Passed     int    `json:"passed"`
+	Failed     int    `json:"failed"`
+}
+type evaluationNodeResult struct {
+	NodeID          string  `json:"nodeId"`
+	Name            string  `json:"name"`
+	State           string  `json:"state"`
+	Attempts        int     `json:"attempts"`
+	Successful      int     `json:"successful"`
+	MedianLatencyMS float64 `json:"medianLatencyMs"`
+	ExitIdentity    string  `json:"exitIdentity,omitempty"`
+	Reason          string  `json:"reason,omitempty"`
+}
+type evaluationRunResponse struct {
+	evaluationRun
+	Results []evaluationNodeResult `json:"results"`
+}
+type evaluationNode struct {
+	ID     string
+	Name   string
+	Config map[string]any
+}
+
+func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+	}
+	for _, statement := range statements {
+		if _, err := application.database.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("initialize Evaluation Run storage: %w", err)
+		}
+	}
+	return nil
+}
+
+func (application *Application) registerEvaluationRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/evaluation-runs", application.handleStartEvaluationRun)
+	mux.HandleFunc("GET /api/evaluation-runs/current", application.handleCurrentEvaluationRun)
+	mux.HandleFunc("GET /api/evaluation-runs/{id}", application.handleGetEvaluationRun)
+}
+
+func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, r *http.Request) {
+	application.evaluationMu.Lock()
+	if application.runID != "" {
+		id := application.runID
+		application.evaluationMu.Unlock()
+		run, err := application.readEvaluationRun(r.Context(), id)
+		if err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, run)
+		return
+	}
+	id, err := randomID()
+	if err != nil {
+		application.evaluationMu.Unlock()
+		writeError(w, 500, err)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = application.database.ExecContext(r.Context(), `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, id, now); err != nil {
+		application.evaluationMu.Unlock()
+		writeError(w, 500, err)
+		return
+	}
+	application.runID = id
+	application.evaluationMu.Unlock()
+	go application.executeEvaluationRun(context.Background(), id)
+	run, _ := application.readEvaluationRun(r.Context(), id)
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (application *Application) handleCurrentEvaluationRun(w http.ResponseWriter, r *http.Request) {
+	application.evaluationMu.Lock()
+	id := application.runID
+	application.evaluationMu.Unlock()
+	if id != "" {
+		run, err := application.readEvaluationRun(r.Context(), id)
+		if err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, run)
+		return
+	}
+	var run evaluationRun
+	err := application.database.QueryRowContext(r.Context(), `SELECT id, status, started_at, finished_at, total, passed, failed FROM evaluation_runs ORDER BY started_at DESC LIMIT 1`).Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 200, evaluationRunResponse{evaluationRun: evaluationRun{Status: "idle"}, Results: []evaluationNodeResult{}})
+		return
+	}
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, application.runResponse(r.Context(), run))
+}
+
+func (application *Application) handleGetEvaluationRun(w http.ResponseWriter, r *http.Request) {
+	run, err := application.readEvaluationRun(r.Context(), r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, 404, errors.New("Evaluation Run not found"))
+		return
+	}
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, run)
+}
+
+func (application *Application) readEvaluationRun(ctx context.Context, id string) (evaluationRunResponse, error) {
+	var run evaluationRun
+	if err := application.database.QueryRowContext(ctx, `SELECT id, status, started_at, finished_at, total, passed, failed FROM evaluation_runs WHERE id = ?`, id).Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed); err != nil {
+		return evaluationRunResponse{}, err
+	}
+	return application.runResponse(ctx, run), nil
+}
+
+func (application *Application) runResponse(ctx context.Context, run evaluationRun) evaluationRunResponse {
+	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}}
+	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item evaluationNodeResult
+		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.Reason) == nil {
+			result.Results = append(result.Results, item)
+		}
+	}
+	return result
+}
+
+func (application *Application) executeEvaluationRun(ctx context.Context, id string) {
+	defer func() { application.evaluationMu.Lock(); application.runID = ""; application.evaluationMu.Unlock() }()
+	nodes, err := application.evaluationNodes(ctx)
+	if err != nil {
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
+		return
+	}
+	passed, failed := 0, 0
+	for _, node := range nodes {
+		item := application.evaluateNode(ctx, node)
+		if item.State == "passed" {
+			passed++
+		} else {
+			failed++
+		}
+		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.Reason)
+		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
+	}
+	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) finishEvaluationRun(ctx context.Context, id string, total, passed, failed int, runErr error) {
+	status := "completed"
+	if runErr != nil {
+		status = "failed"
+	}
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, finished_at = ? WHERE id = ?`, status, total, passed, failed, time.Now().UTC().Format(time.RFC3339Nano), id)
+}
+
+func (application *Application) evaluationNodes(ctx context.Context) ([]evaluationNode, error) {
+	rows, err := application.database.QueryContext(ctx, `SELECT p.id, p.name, p.config FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.state = 'accepted' AND s.enabled = 1 ORDER BY p.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]evaluationNode, 0)
+	for rows.Next() {
+		var node evaluationNode
+		var config []byte
+		if err := rows.Scan(&node.ID, &node.Name, &config); err != nil {
+			return nil, err
+		}
+		if err := yaml.Unmarshal(config, &node.Config); err != nil {
+			return nil, err
+		}
+		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+func (application *Application) evaluateNode(ctx context.Context, node evaluationNode) evaluationNodeResult {
+	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
+	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
+	if !ok {
+		result.Reason = "test_channel_unverified: availability channel cannot prove Proxy Node ownership"
+		return result
+	}
+	latencies := make([]time.Duration, 0, DefaultAvailabilityAttempts)
+	for attempt := 0; attempt < DefaultAvailabilityAttempts; attempt++ {
+		result.Attempts++
+		var lastErr error
+		for _, target := range DefaultAvailabilityURLs {
+			probeCtx, cancel := context.WithTimeout(ctx, DefaultAvailabilityTimeout)
+			probe, err := channel.ProbeAttempt(probeCtx, ProxyNode{Name: node.Name, Config: node.Config}, target)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if !probe.Verified {
+				result.Reason = "test_channel_unverified: request ownership could not be proven"
+				return result
+			}
+			if probe.Success {
+				latencies = append(latencies, probe.Latency)
+				result.Successful++
+				result.ExitIdentity = probe.ExitIdentity
+				break
+			}
+		}
+		if lastErr != nil && result.Reason == "" {
+			result.Reason = "probe_failed: " + lastErr.Error()
+		}
+	}
+	if len(latencies) > 0 {
+		result.MedianLatencyMS = medianLatency(latencies).Seconds() * 1000
+	}
+	if result.Successful < 2 {
+		if result.Reason == "" {
+			result.Reason = fmt.Sprintf("insufficient_successes: %d/%d", result.Successful, DefaultAvailabilityAttempts)
+		}
+		return result
+	}
+	if result.MedianLatencyMS > DefaultAvailabilityMaxLatency.Seconds()*1000 {
+		result.Reason = "latency_exceeded: median latency is above 1500ms"
+		return result
+	}
+	result.State = "passed"
+	return result
+}
+
+func medianLatency(values []time.Duration) time.Duration {
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[len(sorted)/2]
+}

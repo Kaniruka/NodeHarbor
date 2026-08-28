@@ -32,6 +32,13 @@ const messages = {
     language: "语言",
     switchLanguage: "English",
     loadError: "无法读取系统健康状态，请确认后端正在运行。",
+    evaluation: "评估运行",
+    startEvaluation: "开始评估",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+    idle: "尚未运行",
+    summary: (passed: number, total: number) => `${passed} / ${total} 个节点通过`,
   },
   en: {
     eyebrow: "Local proxy subscription curator",
@@ -52,6 +59,13 @@ const messages = {
     language: "Language",
     switchLanguage: "简体中文",
     loadError: "System health could not be loaded. Confirm that the backend is running.",
+    evaluation: "Evaluation Run",
+    startEvaluation: "Start evaluation",
+    running: "Running",
+    completed: "Completed",
+    failed: "Failed",
+    idle: "Not run yet",
+    summary: (passed: number, total: number) => `${passed} / ${total} Proxy Nodes passed`,
   },
 } as const;
 
@@ -154,6 +168,8 @@ export default function App() {
 
       <UpstreamSubscriptions locale={locale} />
 
+      <EvaluationRun locale={locale} text={text} />
+
       <section className="subscriptionCard" aria-labelledby="subscription-heading">
         <div>
           <h2 id="subscription-heading">{text.subscription}</h2>
@@ -166,6 +182,30 @@ export default function App() {
       </section>
     </main>
   );
+}
+
+type EvaluationText = typeof messages[Locale];
+type EvaluationState = { status: "idle" | "running" | "completed" | "failed"; total: number; passed: number; failed: number; results: Array<{ name: string; state: string; medianLatencyMs: number; reason?: string }> };
+
+function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
+  const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const load = () => fetch("/api/evaluation-runs/current").then(requireOK).then((response) => response.json()).then((value) => { if (active && Array.isArray(value.results) && typeof value.status === "string") setRun({ ...value, results: value.results }); }).catch(() => undefined);
+    load();
+    const timer = window.setInterval(load, 1000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+  async function start() {
+    setBusy(true);
+    try { const response = await fetch("/api/evaluation-runs", { method: "POST" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
+  }
+  const statusLabel = text[run.status];
+  return <section className="panel evaluationPanel" aria-labelledby="evaluation-heading">
+    <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
+    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.medianLatencyMs.toFixed(0)} ms` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}</div>)}</div>}
+  </section>;
 }
 
 function HealthCard({ label, state, statusLabel }: { label: string; state: HealthState; statusLabel: string }) {
