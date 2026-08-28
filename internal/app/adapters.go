@@ -18,7 +18,7 @@ import (
 func DefaultDependencies(kernel Kernel) Dependencies {
 	return Dependencies{
 		Upstream:    NewHTTPUpstream(30 * time.Second),
-		Scoring:     UnavailableScoringProvider{},
+		Scoring:     NewIPLarkProvider(nil),
 		Kernel:      kernel,
 		TestChannel: UnavailableTestChannel{},
 	}

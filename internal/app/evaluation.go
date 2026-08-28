@@ -292,7 +292,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
 		return result
 	}
-	score, family, err := application.scoreWithCache(ctx, result.ExitIdentity)
+	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel)
 	result.AddressFamily = family
 	if err != nil {
 		result.Reason = "score_unavailable: " + err.Error()
@@ -307,6 +307,21 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	return result
 }
 
+func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel) (float64, string, error) {
+	if provider, ok := application.dependencies.Scoring.(ChannelScoringProvider); ok {
+		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
+		if !hasTransport {
+			return 0, addressFamily(exitIdentity), errors.New("Test Channel cannot provide scoring transport")
+		}
+		client, err := transportProvider.HTTPClient(ctx, ProxyNode{Name: node.Name, Config: node.Config})
+		if err != nil {
+			return 0, addressFamily(exitIdentity), err
+		}
+		return application.scoreWithCacheUsing(ctx, exitIdentity, func() (float64, error) { return provider.ScoreWithClient(ctx, exitIdentity, client) })
+	}
+	return application.scoreWithCache(ctx, exitIdentity)
+}
+
 func medianLatency(values []time.Duration) time.Duration {
 	sorted := append([]time.Duration(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
@@ -314,6 +329,10 @@ func medianLatency(values []time.Duration) time.Duration {
 }
 
 func (application *Application) scoreWithCache(ctx context.Context, exitIdentity string) (float64, string, error) {
+	return application.scoreWithCacheUsing(ctx, exitIdentity, func() (float64, error) { return application.dependencies.Scoring.Score(ctx, exitIdentity) })
+}
+
+func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, scoreProvider func() (float64, error)) (float64, string, error) {
 	family := addressFamily(exitIdentity)
 	if family == "" {
 		return 0, "", errors.New("exit identity is not a valid IP address")
@@ -328,7 +347,7 @@ func (application *Application) scoreWithCache(ctx context.Context, exitIdentity
 			return score, family, nil
 		}
 	}
-	score, err = application.dependencies.Scoring.Score(ctx, exitIdentity)
+	score, err = scoreProvider()
 	if err != nil {
 		return 0, family, err
 	}

@@ -75,6 +75,14 @@ type AvailabilityChannel interface {
 	ProbeAttempt(context.Context, ProxyNode, string) (AvailabilityAttempt, error)
 }
 
+type TestChannelHTTPClient interface {
+	HTTPClient(context.Context, ProxyNode) (*http.Client, error)
+}
+
+type ChannelScoringProvider interface {
+	ScoreWithClient(context.Context, string, *http.Client) (float64, error)
+}
+
 type UpstreamRequest struct {
 	Location  string
 	UserAgent string
