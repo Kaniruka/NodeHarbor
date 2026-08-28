@@ -39,6 +39,11 @@ const messages = {
     failed: "失败",
     idle: "尚未运行",
     summary: (passed: number, total: number) => `${passed} / ${total} 个节点通过`,
+    provider: "评分源",
+    threshold: "合格阈值",
+    ipcheck: "IPCheck.ing",
+    iplark: "IPLark",
+    saveSettings: "保存评分设置",
   },
   en: {
     eyebrow: "Local proxy subscription curator",
@@ -66,6 +71,11 @@ const messages = {
     failed: "Failed",
     idle: "Not run yet",
     summary: (passed: number, total: number) => `${passed} / ${total} Proxy Nodes passed`,
+    provider: "Scoring Provider",
+    threshold: "Pass threshold",
+    ipcheck: "IPCheck.ing",
+    iplark: "IPLark",
+    saveSettings: "Save scoring settings",
   },
 } as const;
 
@@ -190,6 +200,8 @@ type EvaluationState = { status: "idle" | "running" | "completed" | "failed"; to
 function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
   const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
   const [busy, setBusy] = useState(false);
+  const [provider, setProvider] = useState<"iplark" | "ipcheck">("iplark");
+  const [threshold, setThreshold] = useState(70);
   useEffect(() => {
     let active = true;
     const load = () => fetch("/api/evaluation-runs/current").then(requireOK).then((response) => response.json()).then((value) => { if (active && Array.isArray(value.results) && typeof value.status === "string") setRun({ ...value, results: value.results }); }).catch(() => undefined);
@@ -197,13 +209,18 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     const timer = window.setInterval(load, 1000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { setProvider(settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"); setThreshold(settings[settings.scoringProvider === "ipcheck" ? "ipcheckThreshold" : "iplarkThreshold"] || 70); }).catch(() => undefined); }, []);
   async function start() {
     setBusy(true);
     try { const response = await fetch("/api/evaluation-runs", { method: "POST" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
   }
+  async function saveScoringSettings() {
+    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, [provider === "ipcheck" ? "ipcheckThreshold" : "iplarkThreshold"]: threshold }) });
+  }
   const statusLabel = text[run.status];
   return <section className="panel evaluationPanel" aria-labelledby="evaluation-heading">
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
+    <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} onChange={(event) => setProvider(event.target.value as "iplark" | "ipcheck")}><option value="iplark">{text.iplark}</option><option value="ipcheck">{text.ipcheck}</option></select></label><label><span>{text.threshold}</span><input type="number" min="0" max="100" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
     {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
 }

@@ -299,16 +299,50 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		return result
 	}
 	result.IPScore = &score
-	if score < 70 {
-		result.Reason = fmt.Sprintf("low_score: IP Score %.2f is below threshold 70", score)
+	threshold := application.scoringThreshold(ctx, scoringProviderKey(application.dependencies.Scoring))
+	if configured, err := application.configuredScoringProvider(ctx); err == nil {
+		threshold = application.scoringThreshold(ctx, scoringProviderKey(configured))
+	}
+	if score < float64(threshold) {
+		result.Reason = fmt.Sprintf("low_score: IP Score %.2f is below threshold %d", score, threshold)
 		return result
 	}
 	result.State = "passed"
 	return result
 }
 
+func (application *Application) configuredScoringProvider(ctx context.Context) (ScoringProvider, error) {
+	var name string
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_provider'`).Scan(&name); err != nil {
+		return application.dependencies.Scoring, err
+	}
+	if provider, ok := application.dependencies.ScoringProviders[name]; ok {
+		return provider, nil
+	}
+	if name == "iplark" && application.dependencies.Scoring != nil {
+		return application.dependencies.Scoring, nil
+	}
+	return nil, fmt.Errorf("Scoring Provider %q is not configured", name)
+}
+
+func (application *Application) scoringThreshold(ctx context.Context, provider string) int {
+	key := "ipcheck_threshold"
+	if provider == "iplark" {
+		key = "iplark_threshold"
+	}
+	var value int
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil || value < 0 || value > 100 {
+		return 70
+	}
+	return value
+}
+
 func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel) (float64, string, error) {
-	if provider, ok := application.dependencies.Scoring.(ChannelScoringProvider); ok {
+	providerValue := application.dependencies.Scoring
+	if configured, err := application.configuredScoringProvider(ctx); err == nil {
+		providerValue = configured
+	}
+	if provider, ok := providerValue.(ChannelScoringProvider); ok {
 		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
 		if !hasTransport {
 			return 0, addressFamily(exitIdentity), errors.New("Test Channel cannot provide scoring transport")
@@ -317,9 +351,9 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		if err != nil {
 			return 0, addressFamily(exitIdentity), err
 		}
-		return application.scoreWithCacheUsing(ctx, exitIdentity, func() (float64, error) { return provider.ScoreWithClient(ctx, exitIdentity, client) })
+		return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) { return provider.ScoreWithClient(ctx, exitIdentity, client) })
 	}
-	return application.scoreWithCache(ctx, exitIdentity)
+	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) { return providerValue.Score(ctx, exitIdentity) })
 }
 
 func medianLatency(values []time.Duration) time.Duration {
@@ -329,18 +363,19 @@ func medianLatency(values []time.Duration) time.Duration {
 }
 
 func (application *Application) scoreWithCache(ctx context.Context, exitIdentity string) (float64, string, error) {
-	return application.scoreWithCacheUsing(ctx, exitIdentity, func() (float64, error) { return application.dependencies.Scoring.Score(ctx, exitIdentity) })
+	provider := application.dependencies.Scoring
+	return application.scoreWithCacheUsing(ctx, exitIdentity, provider, func() (float64, error) { return provider.Score(ctx, exitIdentity) })
 }
 
-func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, scoreProvider func() (float64, error)) (float64, string, error) {
+func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, scoreProvider func() (float64, error)) (float64, string, error) {
 	family := addressFamily(exitIdentity)
 	if family == "" {
 		return 0, "", errors.New("exit identity is not a valid IP address")
 	}
-	provider := scoringProviderKey(application.dependencies.Scoring)
+	providerKey := scoringProviderKey(provider)
 	var score float64
 	var scoredAt string
-	err := application.database.QueryRowContext(ctx, `SELECT score, scored_at FROM score_cache WHERE provider = ? AND exit_identity = ?`, provider, exitIdentity).Scan(&score, &scoredAt)
+	err := application.database.QueryRowContext(ctx, `SELECT score, scored_at FROM score_cache WHERE provider = ? AND exit_identity = ?`, providerKey, exitIdentity).Scan(&score, &scoredAt)
 	if err == nil {
 		when, parseErr := time.Parse(time.RFC3339Nano, scoredAt)
 		if parseErr == nil && time.Since(when) <= 24*time.Hour {
@@ -351,7 +386,7 @@ func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIde
 	if err != nil {
 		return 0, family, err
 	}
-	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, provider, exitIdentity, score, family, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, providerKey, exitIdentity, score, family, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, family, fmt.Errorf("store IP Score cache: %w", err)
 	}

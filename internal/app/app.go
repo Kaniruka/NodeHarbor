@@ -105,10 +105,11 @@ type TestChannel interface {
 }
 
 type Dependencies struct {
-	Upstream    Upstream
-	Scoring     ScoringProvider
-	Kernel      Kernel
-	TestChannel TestChannel
+	Upstream         Upstream
+	Scoring          ScoringProvider
+	ScoringProviders map[string]ScoringProvider
+	Kernel           Kernel
+	TestChannel      TestChannel
 }
 
 type Config struct {
@@ -138,8 +139,11 @@ type healthResponse struct {
 }
 
 type settingsResponse struct {
-	Language       string `json:"language"`
-	InstallationID string `json:"installationId"`
+	Language         string `json:"language"`
+	InstallationID   string `json:"installationId"`
+	ScoringProvider  string `json:"scoringProvider"`
+	IPLarkThreshold  int    `json:"iplarkThreshold"`
+	IPCheckThreshold int    `json:"ipcheckThreshold"`
 }
 
 func Open(ctx context.Context, config Config, dependencies Dependencies) (*Application, error) {
@@ -186,6 +190,11 @@ func (application *Application) initialize(ctx context.Context) error {
 	}
 	if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES ('language', 'auto')`); err != nil {
 		return fmt.Errorf("initialize language: %w", err)
+	}
+	for key, value := range map[string]string{"scoring_provider": "iplark", "iplark_threshold": "70", "ipcheck_threshold": "70"} {
+		if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)`, key, value); err != nil {
+			return fmt.Errorf("initialize scoring setting: %w", err)
+		}
 	}
 	installationID, err := randomID()
 	if err != nil {
@@ -270,7 +279,10 @@ func (application *Application) handleGetSettings(response http.ResponseWriter, 
 
 func (application *Application) handlePutSettings(response http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Language string `json:"language"`
+		Language         string `json:"language"`
+		ScoringProvider  string `json:"scoringProvider"`
+		IPLarkThreshold  *int   `json:"iplarkThreshold"`
+		IPCheckThreshold *int   `json:"ipcheckThreshold"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -279,12 +291,34 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		return
 	}
 	if input.Language != "zh-CN" && input.Language != "en" {
-		writeError(response, http.StatusBadRequest, errors.New("language must be zh-CN or en"))
+		if input.Language != "" {
+			writeError(response, http.StatusBadRequest, errors.New("language must be zh-CN or en"))
+			return
+		}
+	}
+	if input.ScoringProvider != "" && input.ScoringProvider != "iplark" && input.ScoringProvider != "ipcheck" {
+		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipcheck"))
 		return
 	}
-	if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = 'language'`, input.Language); err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold} {
+		if value == nil || value == "" {
+			continue
+		}
+		stored := fmt.Sprint(value)
+		if number, ok := value.(*int); ok {
+			if number == nil {
+				continue
+			}
+			if *number < 0 || *number > 100 {
+				writeError(response, http.StatusBadRequest, errors.New("score thresholds must be between 0 and 100"))
+				return
+			}
+			stored = fmt.Sprint(*number)
+		}
+		if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = ?`, stored, name); err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -296,6 +330,15 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM system_state WHERE key = 'installation_id'`).Scan(&result.InstallationID); err != nil {
 		return result, fmt.Errorf("read installation id: %w", err)
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_provider'`).Scan(&result.ScoringProvider); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'iplark_threshold'`).Scan(&result.IPLarkThreshold); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipcheck_threshold'`).Scan(&result.IPCheckThreshold); err != nil {
+		return result, err
 	}
 	return result, nil
 }

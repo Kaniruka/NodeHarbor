@@ -16,11 +16,14 @@ import (
 )
 
 func DefaultDependencies(kernel Kernel) Dependencies {
+	iplark := NewIPLarkProvider(nil)
+	ipcheck := NewIPCheckProvider(nil)
 	return Dependencies{
-		Upstream:    NewHTTPUpstream(30 * time.Second),
-		Scoring:     NewIPLarkProvider(nil),
-		Kernel:      kernel,
-		TestChannel: UnavailableTestChannel{},
+		Upstream:         NewHTTPUpstream(30 * time.Second),
+		Scoring:          iplark,
+		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipcheck": ipcheck},
+		Kernel:           kernel,
+		TestChannel:      UnavailableTestChannel{},
 	}
 }
 
