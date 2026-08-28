@@ -1,0 +1,31 @@
+# Local agent scratch work
+.scratch/
+
+# Frontend dependencies and output
+node_modules/
+dist/
+coverage/
+
+# Go output
+bin/
+*.exe
+*.test
+*.out
+
+# Runtime state
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
