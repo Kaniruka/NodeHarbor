@@ -111,6 +111,22 @@ func TestManagementPageIsServedByTheRealBackend(t *testing.T) {
 	}
 }
 
+func TestNonLoopbackCanReadOnlyHealthAndPublication(t *testing.T) {
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
+	for _, path := range []struct {
+		path   string
+		status int
+	}{{"/api/health", http.StatusOK}, {"/sub/clash.yaml", http.StatusOK}, {"/api/settings", http.StatusForbidden}, {"/", http.StatusForbidden}} {
+		request := httptest.NewRequest(http.MethodGet, "http://nodeharbor"+path.path, nil)
+		request.RemoteAddr = "192.0.2.10:4000"
+		response := httptest.NewRecorder()
+		instance.Handler().ServeHTTP(response, request)
+		if response.Code != path.status {
+			t.Fatalf("%s status=%d want=%d", path.path, response.Code, path.status)
+		}
+	}
+}
+
 func TestBlackBoxEvaluationRequestTraversesReplaceableAdapters(t *testing.T) {
 	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: fixture-node\n    type: ss\n    server: example.test\n    port: 443\n")}
 	kernel := &recordingKernel{}

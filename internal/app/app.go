@@ -356,7 +356,7 @@ func (application *Application) handlePublishedSubscription(response http.Respon
 
 func loopbackManagementOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/sub/clash.yaml" {
+		if request.URL.Path != "/sub/clash.yaml" && request.URL.Path != "/api/health" {
 			host, _, err := net.SplitHostPort(request.RemoteAddr)
 			if err != nil || !net.ParseIP(strings.Trim(host, "[]")).IsLoopback() {
 				http.Error(response, "management interface is loopback-only", http.StatusForbidden)
