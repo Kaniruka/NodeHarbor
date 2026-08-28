@@ -209,7 +209,63 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.Reason)
 		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
 	}
+	if passed > 0 {
+		if err := application.publishQualifiedNodes(ctx, id); err != nil {
+			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
+			return
+		}
+	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) publishQualifiedNodes(ctx context.Context, runID string) error {
+	rows, err := application.database.QueryContext(ctx, `SELECT p.config FROM evaluation_results r JOIN proxy_nodes p ON p.id = r.node_id WHERE r.run_id = ? AND r.state = 'passed' ORDER BY r.name`, runID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	proxies := make([]map[string]any, 0)
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return err
+		}
+		var config map[string]any
+		if err := yaml.Unmarshal(data, &config); err != nil {
+			return err
+		}
+		proxies = append(proxies, config)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(proxies) == 0 {
+		return nil
+	}
+	groups := []map[string]any{
+		{"name": "AUTO", "type": "url-test", "proxies": proxyNames(proxies), "url": "https://www.gstatic.com/generate_204", "interval": 300},
+		{"name": "FALLBACK", "type": "fallback", "proxies": proxyNames(proxies), "url": "https://www.gstatic.com/generate_204", "interval": 300},
+		{"name": "SELECT", "type": "select", "proxies": append([]string{"AUTO", "FALLBACK", "DIRECT"}, proxyNames(proxies)...)},
+	}
+	document, err := yaml.Marshal(map[string]any{"proxies": proxies, "proxy-groups": groups})
+	if err != nil {
+		return err
+	}
+	if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
+		return fmt.Errorf("validate Published Subscription: %w", err)
+	}
+	_, err = application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func proxyNames(proxies []map[string]any) []string {
+	names := make([]string, 0, len(proxies))
+	for _, proxy := range proxies {
+		if name, ok := proxy["name"].(string); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func (application *Application) finishEvaluationRun(ctx context.Context, id string, total, passed, failed int, runErr error) {

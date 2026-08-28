@@ -238,6 +238,44 @@ func TestEvaluationRunRejectsPartialFailureTimeoutHighLatencyAndUnknownOwnership
 	}
 }
 
+func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
+	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: published\n    type: ss\n    server: example.test\n    port: 443\nrules:\n  - MATCH,DIRECT\ndns:\n  enable: true\n")}, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" {
+		t.Fatalf("run status=%s", run.Status)
+	}
+	publicationResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publicationResponse.Body.Close()
+	var publication struct {
+		Proxies []map[string]any `yaml:"proxies"`
+		Groups  []map[string]any `yaml:"proxy-groups"`
+		Rules   []string         `yaml:"rules"`
+		DNS     map[string]any   `yaml:"dns"`
+	}
+	if err := yaml.NewDecoder(publicationResponse.Body).Decode(&publication); err != nil {
+		t.Fatal(err)
+	}
+	if len(publication.Proxies) != 1 || publication.Proxies[0]["name"] != "[Publish] published" || len(publication.Groups) != 3 || publication.Rules != nil || publication.DNS != nil {
+		t.Fatalf("publication=%+v", publication)
+	}
+}
+
 func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel app.Kernel) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
