@@ -4,6 +4,8 @@ NodeHarbor is a self-hosted tool for aggregating Clash/Mihomo subscriptions, che
 
 The first runnable slice provides a persistent Go/SQLite backend, an embedded React WebUI, system health endpoints, and an initial valid Published Subscription.
 
+The WebUI can manage up to ten Upstream Subscriptions imported from a URL, uploaded YAML file, or pasted YAML. URL sources preserve the complete URL and optional User-Agent. Successful raw documents are retained verbatim, while failed refreshes keep the previous successful content and expose the error in the source list.
+
 ## Run on Windows
 
 Requirements: Go 1.24 or newer and Node.js 24 or newer.

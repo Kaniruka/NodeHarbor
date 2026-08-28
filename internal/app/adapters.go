@@ -10,13 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 func DefaultDependencies(kernel Kernel) Dependencies {
 	return Dependencies{
-		Upstream:    UnavailableUpstream{},
+		Upstream:    NewHTTPUpstream(30 * time.Second),
 		Scoring:     UnavailableScoringProvider{},
 		Kernel:      kernel,
 		TestChannel: UnavailableTestChannel{},
@@ -25,7 +26,7 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 
 type UnavailableUpstream struct{}
 
-func (UnavailableUpstream) Fetch(context.Context, string) ([]byte, error) {
+func (UnavailableUpstream) Fetch(context.Context, UpstreamRequest) ([]byte, error) {
 	return nil, ErrUnavailable
 }
 

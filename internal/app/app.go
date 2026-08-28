@@ -30,8 +30,13 @@ type ProbeResult struct {
 	Latency      time.Duration
 }
 
+type UpstreamRequest struct {
+	Location  string
+	UserAgent string
+}
+
 type Upstream interface {
-	Fetch(context.Context, string) ([]byte, error)
+	Fetch(context.Context, UpstreamRequest) ([]byte, error)
 }
 
 type ScoringProvider interface {
@@ -134,6 +139,9 @@ func (application *Application) initialize(ctx context.Context) error {
 	if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO system_state(key, value) VALUES ('installation_id', ?)`, installationID); err != nil {
 		return fmt.Errorf("initialize system state: %w", err)
 	}
+	if err := application.initializeUpstreamSubscriptions(ctx); err != nil {
+		return err
+	}
 	return application.ensureInitialPublication(ctx)
 }
 
@@ -165,6 +173,7 @@ func (application *Application) routes(config Config) http.Handler {
 	mux.HandleFunc("GET /api/settings", application.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", application.handlePutSettings)
 	mux.HandleFunc("GET /sub/clash.yaml", application.handlePublishedSubscription)
+	application.registerUpstreamSubscriptionRoutes(mux)
 	if config.EnableTestEndpoints {
 		mux.HandleFunc("POST /_test/evaluation", application.handleTestEvaluation)
 	}

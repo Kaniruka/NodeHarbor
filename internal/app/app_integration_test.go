@@ -135,8 +135,8 @@ func TestBlackBoxEvaluationRequestTraversesReplaceableAdapters(t *testing.T) {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("evaluation status=%d body=%q", response.StatusCode, body)
 	}
-	if upstream.location != "fixture://subscription" || channel.node.Name != "fixture-node" || scoring.exitIdentity != "203.0.113.7" {
-		t.Fatalf("adapters were not traversed: upstream=%q node=%q exit=%q", upstream.location, channel.node.Name, scoring.exitIdentity)
+	if upstream.request.Location != "fixture://subscription" || channel.node.Name != "fixture-node" || scoring.exitIdentity != "203.0.113.7" {
+		t.Fatalf("adapters were not traversed: upstream=%q node=%q exit=%q", upstream.request.Location, channel.node.Name, scoring.exitIdentity)
 	}
 	if !bytes.Equal(kernel.validated, upstream.document) {
 		t.Fatal("upstream document did not pass through the kernel adapter")
@@ -244,7 +244,7 @@ func (kernel *recordingKernel) Validate(_ context.Context, document []byte) erro
 
 type unavailableUpstream struct{}
 
-func (unavailableUpstream) Fetch(context.Context, string) ([]byte, error) {
+func (unavailableUpstream) Fetch(context.Context, app.UpstreamRequest) ([]byte, error) {
 	return nil, app.ErrUnavailable
 }
 
@@ -262,11 +262,11 @@ func (unavailableTestChannel) Probe(context.Context, app.ProxyNode) (app.ProbeRe
 
 type recordingUpstream struct {
 	document []byte
-	location string
+	request  app.UpstreamRequest
 }
 
-func (upstream *recordingUpstream) Fetch(_ context.Context, location string) ([]byte, error) {
-	upstream.location = location
+func (upstream *recordingUpstream) Fetch(_ context.Context, request app.UpstreamRequest) ([]byte, error) {
+	upstream.request = request
 	return upstream.document, nil
 }
 

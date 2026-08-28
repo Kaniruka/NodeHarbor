@@ -18,7 +18,7 @@ func (application *Application) handleTestEvaluation(response http.ResponseWrite
 		writeError(response, http.StatusBadRequest, errors.New("upstream is required"))
 		return
 	}
-	document, err := application.dependencies.Upstream.Fetch(request.Context(), input.Upstream)
+	document, err := application.dependencies.Upstream.Fetch(request.Context(), UpstreamRequest{Location: input.Upstream})
 	if err != nil {
 		writeError(response, http.StatusBadGateway, err)
 		return

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./styles.css";
+import UpstreamSubscriptions from "./UpstreamSubscriptions";
 
 type Locale = "zh-CN" | "en";
 type HealthState = "loading" | "healthy" | "unhealthy";
@@ -150,6 +151,8 @@ export default function App() {
           <HealthCard label={text.publication} state={health.publishedSubscription.status} statusLabel={text[health.publishedSubscription.status]} />
         </div>
       </section>
+
+      <UpstreamSubscriptions locale={locale} />
 
       <section className="subscriptionCard" aria-labelledby="subscription-heading">
         <div>

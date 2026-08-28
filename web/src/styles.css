@@ -108,7 +108,7 @@ h1 {
   background: rgba(112, 35, 31, 0.22);
 }
 
-.panel, .subscriptionCard {
+.panel, .subscriptionCard, .upstreamPanel {
   border: 1px solid rgba(151, 190, 207, 0.15);
   background: rgba(9, 30, 44, 0.78);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.18);
@@ -116,6 +116,12 @@ h1 {
 }
 
 .panel { border-radius: 22px; padding: 28px; }
+
+.upstreamPanel {
+  margin-top: 18px;
+  padding: 28px;
+  border-radius: 22px;
+}
 
 .panelHeading {
   display: flex;
@@ -209,6 +215,188 @@ h1 {
   box-shadow: 0 10px 28px rgba(46, 199, 178, 0.22);
 }
 
+.sourceCount {
+  flex: 0 0 auto;
+  color: #8eb0bf;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.sourceForm {
+  margin-top: 24px;
+  padding: 18px;
+  border: 1px solid rgba(151, 190, 207, 0.11);
+  border-radius: 16px;
+  background: rgba(4, 20, 31, 0.48);
+}
+
+.importTabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 11px;
+  background: rgba(126, 160, 177, 0.09);
+}
+
+.importTabs button,
+.secondaryButton,
+.sourceActions button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 11px;
+  color: #9db4c0;
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.importTabs button.active {
+  color: #dff8f4;
+  border-color: rgba(104, 224, 207, 0.18);
+  background: rgba(33, 110, 108, 0.3);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.45fr) 1fr;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.formGrid label {
+  display: grid;
+  gap: 7px;
+  color: #9db4c0;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.formGrid .wideField { grid-column: 1 / -1; }
+
+.formGrid input,
+.formGrid textarea {
+  width: 100%;
+  border: 1px solid rgba(151, 190, 207, 0.17);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #e8f2f8;
+  background: rgba(3, 16, 25, 0.72);
+  outline: none;
+}
+
+.formGrid textarea {
+  resize: vertical;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  line-height: 1.5;
+}
+
+.formGrid input:focus,
+.formGrid textarea:focus {
+  border-color: rgba(104, 224, 207, 0.56);
+  box-shadow: 0 0 0 3px rgba(104, 224, 207, 0.08);
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.secondaryButton,
+.sourceActions button {
+  border-color: rgba(151, 190, 207, 0.14);
+  background: rgba(83, 118, 135, 0.09);
+}
+
+.formError,
+.sourceError {
+  margin: 14px 0 0;
+  color: #ffaaa0;
+  line-height: 1.5;
+}
+
+.sourceList {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 24px;
+  border: 1px dashed rgba(151, 190, 207, 0.17);
+  border-radius: 12px;
+  color: #7894a3;
+  text-align: center;
+}
+
+.sourceCard {
+  padding: 18px;
+  border: 1px solid rgba(151, 190, 207, 0.12);
+  border-radius: 14px;
+  background: rgba(4, 20, 31, 0.62);
+}
+
+.sourceCard--disabled { opacity: 0.62; }
+
+.sourceCardMain {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sourceCard h3 { margin-bottom: 5px; font-size: 0.98rem; }
+
+.sourceMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0;
+  color: #7894a3;
+  font-size: 0.8rem;
+}
+
+.sourceMeta span + span::before { content: "·"; margin-right: 7px; }
+
+.refreshState {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #9fb1bb;
+  background: rgba(149, 170, 180, 0.11);
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.refreshState--success { color: #6ce5c6; background: rgba(30, 178, 143, 0.12); }
+.refreshState--failed { color: #ff9f91; background: rgba(209, 72, 62, 0.14); }
+
+.sourceURL {
+  display: block;
+  margin-top: 13px;
+  color: #aed8d1;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.sourceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 15px;
+}
+
+.sourceActions .dangerButton {
+  color: #ffaaa0;
+  border-color: rgba(255, 120, 104, 0.14);
+}
+
 button:focus-visible, a:focus-visible {
   outline: 3px solid rgba(104, 224, 207, 0.55);
   outline-offset: 3px;
@@ -220,9 +408,13 @@ button:focus-visible, a:focus-visible {
   .languageControl > span { display: none; }
   .hero { padding: 56px 4px 36px; }
   .panel { padding: 20px; }
+  .upstreamPanel { padding: 20px; }
   .panelHeading { align-items: center; }
   .healthGrid { grid-template-columns: 1fr; }
   .healthCard { min-height: 82px; }
   .subscriptionCard { align-items: stretch; flex-direction: column; padding: 22px; }
+  .formGrid { grid-template-columns: 1fr; }
+  .formGrid .wideField { grid-column: auto; }
+  .importTabs { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
   .primaryButton { width: 100%; }
 }
