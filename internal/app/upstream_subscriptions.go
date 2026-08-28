@@ -121,19 +121,20 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 		return fmt.Errorf("begin Proxy Node identity migration: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, subscription_id, original_name, config FROM proxy_nodes WHERE fingerprint = ''`)
+	rows, err := tx.QueryContext(ctx, `SELECT id, subscription_id, original_name, fingerprint, config FROM proxy_nodes ORDER BY subscription_id, id`)
 	if err != nil {
 		return fmt.Errorf("read legacy Proxy Node identities: %w", err)
 	}
 	type legacyNode struct {
 		id, subscriptionID string
 		originalName       string
+		fingerprint        string
 		config             []byte
 	}
 	legacy := make([]legacyNode, 0)
 	for rows.Next() {
 		var node legacyNode
-		if err := rows.Scan(&node.id, &node.subscriptionID, &node.originalName, &node.config); err != nil {
+		if err := rows.Scan(&node.id, &node.subscriptionID, &node.originalName, &node.fingerprint, &node.config); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan legacy Proxy Node identity: %w", err)
 		}
@@ -154,6 +155,9 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 		occurrenceKey := node.subscriptionID + "/" + fingerprint
 		occurrences[occurrenceKey]++
 		newID := stableProxyNodeID(node.subscriptionID, fingerprint, occurrences[occurrenceKey])
+		if node.fingerprint == fingerprint && node.id == newID {
+			continue
+		}
 		if newID != node.id {
 			var existingID string
 			existingErr := tx.QueryRowContext(ctx, `SELECT id FROM proxy_nodes WHERE id = ?`, newID).Scan(&existingID)
