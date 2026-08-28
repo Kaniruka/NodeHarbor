@@ -1,0 +1,232 @@
+package app_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"testing/fstest"
+
+	"github.com/Kaniruka/NodeHarbor/internal/app"
+	"gopkg.in/yaml.v3"
+)
+
+func TestFreshApplicationReportsHealthyAndServesValidEmptyPublishedSubscription(t *testing.T) {
+	kernel := &recordingKernel{}
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), kernel)
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+
+	var health struct {
+		Status                string              `json:"status"`
+		Backend               app.HealthComponent `json:"backend"`
+		Database              app.HealthComponent `json:"database"`
+		PublishedSubscription app.HealthComponent `json:"publishedSubscription"`
+	}
+	getJSON(t, server.URL+"/api/health", &health)
+	if health.Status != "healthy" || health.Backend.Status != "healthy" || health.Database.Status != "healthy" || health.PublishedSubscription.Status != "healthy" {
+		t.Fatalf("unexpected health response: %+v", health)
+	}
+
+	response, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("subscription status = %d", response.StatusCode)
+	}
+	published, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Proxies []map[string]any `yaml:"proxies"`
+		Groups  []struct {
+			Name    string   `yaml:"name"`
+			Type    string   `yaml:"type"`
+			Proxies []string `yaml:"proxies"`
+		} `yaml:"proxy-groups"`
+	}
+	if err := yaml.Unmarshal(published, &document); err != nil {
+		t.Fatalf("published subscription is not YAML: %v", err)
+	}
+	if document.Proxies == nil || len(document.Proxies) != 0 {
+		t.Fatalf("expected an explicit empty proxy list, got %#v", document.Proxies)
+	}
+	if len(document.Groups) != 3 || document.Groups[0].Name != "AUTO" || document.Groups[1].Name != "FALLBACK" || document.Groups[2].Name != "SELECT" {
+		t.Fatalf("unexpected generated groups: %#v", document.Groups)
+	}
+	if !bytes.Equal(kernel.validated, published) {
+		t.Fatal("published subscription was not validated through the replaceable kernel seam")
+	}
+}
+
+func TestSettingsAndSystemStateSurviveApplicationRestart(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
+	first := openTestApplication(t, databasePath, &recordingKernel{})
+	firstServer := httptest.NewServer(first.Handler())
+
+	before := readSettings(t, firstServer.URL)
+	putJSON(t, firstServer.URL+"/api/settings", map[string]string{"language": "en"})
+	firstServer.Close()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openTestApplication(t, databasePath, &recordingKernel{})
+	secondServer := httptest.NewServer(second.Handler())
+	t.Cleanup(secondServer.Close)
+	after := readSettings(t, secondServer.URL)
+	if after.Language != "en" {
+		t.Fatalf("language after restart = %q, want en", after.Language)
+	}
+	if after.InstallationID == "" || after.InstallationID != before.InstallationID {
+		t.Fatalf("installation id did not persist: before=%q after=%q", before.InstallationID, after.InstallationID)
+	}
+}
+
+func TestManagementPageIsServedByTheRealBackend(t *testing.T) {
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+
+	response, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`<div id="root"></div>`)) {
+		t.Fatalf("management page status=%d body=%q", response.StatusCode, body)
+	}
+}
+
+func TestInitialPublishedSubscriptionPassesMihomoValidation(t *testing.T) {
+	mihomoPath := os.Getenv("NODEHARBOR_TEST_MIHOMO")
+	if mihomoPath == "" {
+		t.Skip("NODEHARBOR_TEST_MIHOMO is not set")
+	}
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+	response, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "clash.yaml")
+	if err := os.WriteFile(configPath, document, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(mihomoPath, "-t", "-f", configPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Mihomo rejected the initial published subscription: %v\n%s", err, output)
+	}
+}
+
+type settingsResponse struct {
+	Language       string `json:"language"`
+	InstallationID string `json:"installationId"`
+}
+
+func readSettings(t *testing.T, baseURL string) settingsResponse {
+	t.Helper()
+	var settings settingsResponse
+	getJSON(t, baseURL+"/api/settings", &settings)
+	return settings
+}
+
+func getJSON(t *testing.T, url string, target any) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d", url, response.StatusCode)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func putJSON(t *testing.T, url string, value any) {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		message, _ := io.ReadAll(response.Body)
+		t.Fatalf("PUT %s status=%d body=%q", url, response.StatusCode, message)
+	}
+}
+
+func openTestApplication(t *testing.T, databasePath string, kernel *recordingKernel) *app.Application {
+	t.Helper()
+	assets := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
+	}
+	instance, err := app.Open(context.Background(), app.Config{
+		DatabasePath: databasePath,
+		WebAssets:    fs.FS(assets),
+	}, app.Dependencies{
+		Upstream:    unavailableUpstream{},
+		Scoring:     unavailableScoring{},
+		Kernel:      kernel,
+		TestChannel: unavailableTestChannel{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	return instance
+}
+
+type recordingKernel struct{ validated []byte }
+
+func (kernel *recordingKernel) Validate(_ context.Context, document []byte) error {
+	kernel.validated = append([]byte(nil), document...)
+	return nil
+}
+
+type unavailableUpstream struct{}
+
+func (unavailableUpstream) Fetch(context.Context, string) ([]byte, error) {
+	return nil, app.ErrUnavailable
+}
+
+type unavailableScoring struct{}
+
+func (unavailableScoring) Score(context.Context, string) (float64, error) {
+	return 0, app.ErrUnavailable
+}
+
+type unavailableTestChannel struct{}
+
+func (unavailableTestChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, app.ErrUnavailable
+}

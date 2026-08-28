@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test and build WebUI
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+
+      - name: Download pinned Mihomo validator
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'mihomo.zip'
+          Invoke-WebRequest 'https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-v1.19.30.zip' -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
+          $expected = '22C09FD67673895EF7CD6B1820563918275C3D316F2462B306208675118DB3C0'
+          if ($actual -ne $expected) { throw "Mihomo checksum mismatch: $actual" }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'mihomo')
+
+      - name: Test and build backend
+        shell: pwsh
+        run: |
+          $env:NODEHARBOR_TEST_MIHOMO = Join-Path $env:RUNNER_TEMP 'mihomo/mihomo-windows-amd64.exe'
+          go test ./...
+          go vet ./...
+          go build ./cmd/nodeharbor

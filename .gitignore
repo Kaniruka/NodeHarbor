@@ -5,6 +5,8 @@
 node_modules/
 dist/
 coverage/
+!internal/web/dist/
+!internal/web/dist/**
 
 # Go output
 bin/
