@@ -160,6 +160,12 @@ type SurfingRuntimeInspector interface {
 	Inspect(context.Context) (SurfingRuntimeInspection, error)
 }
 
+// SurfingProbeTargetVerifier independently checks that the local target used
+// to prove the Test Channel bypass is reached directly.
+type SurfingProbeTargetVerifier interface {
+	Verify(context.Context) (bool, error)
+}
+
 type UpstreamRequest struct {
 	Location  string
 	UserAgent string
