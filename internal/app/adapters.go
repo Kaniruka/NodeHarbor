@@ -19,8 +19,12 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
 	ipcheck := NewIPCheckProvider(nil)
 	testChannel := TestChannel(UnavailableTestChannel{})
+	var isolation SurfingIsolationGuard
 	if mihomo, ok := kernel.(MihomoKernel); ok {
 		testChannel = NewMihomoTestChannel(mihomo.executablePath, mihomo.build)
+		if mihomo.build.Platform == KernelSUMihomoBuild.Platform {
+			isolation = UnavailableSurfingIsolation{}
+		}
 	}
 	return Dependencies{
 		Upstream:         NewHTTPUpstream(30 * time.Second),
@@ -28,7 +32,7 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipcheck": ipcheck},
 		Kernel:           kernel,
 		TestChannel:      testChannel,
-		Isolation:        UnavailableSurfingIsolation{},
+		Isolation:        isolation,
 	}
 }
 

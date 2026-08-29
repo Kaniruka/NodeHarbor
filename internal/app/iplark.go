@@ -147,7 +147,7 @@ func number(value any) (float64, bool) {
 	return 0, false
 }
 
-var iplarkHTMLScore = regexp.MustCompile(`(?i)ip\s*score[^0-9]{0,80}([0-9]{1,3}(?:\.[0-9]+)?)`)
+var iplarkHTMLScore = regexp.MustCompile(`(?is)<(?:div|span|p)[^>]*>\s*ip\s*score\s*<(?:strong|b|span)[^>]*>\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*</(?:strong|b|span)>\s*</(?:div|span|p)>`)
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
 	content := strings.ToLower(string(body))

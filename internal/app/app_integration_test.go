@@ -482,7 +482,6 @@ func TestDefaultAssemblyUsesIPLarkThroughTheVerifiedTestChannel(t *testing.T) {
 	dependencies.ScoringProviders["iplark"] = provider
 	dependencies.Upstream = &recordingUpstream{document: []byte("proxies:\n  - name: production-assembly\n    type: ss\n    server: example.test\n    port: 443\n")}
 	dependencies.TestChannel = channel
-	dependencies.Isolation = nil
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
 	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, dependencies)
 	if err != nil {
