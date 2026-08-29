@@ -99,6 +99,184 @@ func TestSettingsAndSystemStateSurviveApplicationRestart(t *testing.T) {
 	}
 }
 
+func TestRunPolicyAndEvaluationHistoryAreExposedThroughManagementAPI(t *testing.T) {
+	upstream := &recordingUpstream{document: []byte("proxies: []\n")}
+	server := openEvaluationApplication(t, upstream, &recordingKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{
+		"evaluationIntervalMinutes":     0,
+		"evaluationWorkerCount":         2,
+		"scoringJitterMs":               17,
+		"availabilityAttempts":          4,
+		"availabilityRequiredSuccesses": 3,
+		"availabilityTimeoutSeconds":    9,
+		"availabilityMaxLatencyMs":      1200,
+		"availabilityURLs":              []string{"https://probe.example/204"},
+		"scoreCacheTTLMinutes":          45,
+		"listenPort":                    19876,
+	})
+
+	var settings map[string]any
+	getJSON(t, server.URL+"/api/settings", &settings)
+	for key, want := range map[string]any{
+		"evaluationIntervalMinutes": float64(0), "evaluationWorkerCount": float64(2), "scoringJitterMs": float64(17),
+		"availabilityAttempts": float64(4), "availabilityRequiredSuccesses": float64(3), "availabilityTimeoutSeconds": float64(9),
+		"availabilityMaxLatencyMs": float64(1200), "scoreCacheTTLMinutes": float64(45), "listenPort": float64(19876),
+	} {
+		if settings[key] != want {
+			t.Fatalf("settings[%q] = %#v, want %#v", key, settings[key], want)
+		}
+	}
+
+	configResponse, err := http.Get(server.URL + "/api/settings/export")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configResponse.StatusCode != http.StatusOK || configResponse.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Fatalf("settings export status=%d content-type=%q", configResponse.StatusCode, configResponse.Header.Get("Content-Type"))
+	}
+	var exported map[string]any
+	if err := json.NewDecoder(configResponse.Body).Decode(&exported); err != nil {
+		_ = configResponse.Body.Close()
+		t.Fatal(err)
+	}
+	_ = configResponse.Body.Close()
+	if exported["evaluationWorkerCount"] != float64(2) {
+		t.Fatalf("exported settings = %#v", exported)
+	}
+
+	runResponse := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	if runResponse.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(runResponse.Body)
+		_ = runResponse.Body.Close()
+		t.Fatalf("start evaluation status=%d body=%q", runResponse.StatusCode, body)
+	}
+	_ = runResponse.Body.Close()
+	waitForEvaluationRun(t, server.URL)
+
+	var history []struct {
+		Trigger           string  `json:"trigger"`
+		Phase             string  `json:"phase"`
+		DurationMS        float64 `json:"durationMs"`
+		PublicationResult string  `json:"publicationResult"`
+		FailureSummary    string  `json:"failureSummary"`
+		Phases            []struct {
+			Name string `json:"name"`
+		} `json:"phases"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs", &history)
+	if len(history) == 0 || history[0].Trigger != "manual" || history[0].DurationMS < 0 || history[0].PublicationResult == "" || len(history[0].Phases) == 0 {
+		t.Fatalf("history = %#v", history)
+	}
+
+	logsResponse, err := http.Get(server.URL + "/api/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logsResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(logsResponse.Body)
+		_ = logsResponse.Body.Close()
+		t.Fatalf("logs status=%d body=%q", logsResponse.StatusCode, body)
+	}
+	_ = logsResponse.Body.Close()
+}
+
+func TestSchedulerIsDisabledByZeroAndUsesUpdatedIntervalWithoutRestart(t *testing.T) {
+	clock := newTestClock(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC))
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets), Clock: clock}, app.Dependencies{Upstream: unavailableUpstream{}, Scoring: unavailableScoring{}, Kernel: &recordingKernel{}, TestChannel: unavailableTestChannel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+
+	clock.waitForTimerCount(t, 1)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"evaluationIntervalMinutes": 0})
+	time.Sleep(20 * time.Millisecond)
+	var current struct {
+		Status string `json:"status"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &current)
+	if current.Status != "idle" {
+		t.Fatalf("disabled schedule started a run: %+v", current)
+	}
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{"evaluationIntervalMinutes": 1})
+	clock.waitForTimerCount(t, 2)
+	clock.fireLatest()
+	var history []struct {
+		Trigger string `json:"trigger"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs", &history)
+		if len(history) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(history) == 0 || history[0].Trigger != "scheduled" {
+		t.Fatalf("scheduled history = %+v", history)
+	}
+}
+
+func TestHistoryRetentionRemovesExpiredRunsWithoutChangingPublicationSnapshot(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
+	clock := newTestClock(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC))
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: databasePath, WebAssets: fs.FS(assets), Clock: clock}, app.Dependencies{Upstream: unavailableUpstream{}, Scoring: unavailableScoring{}, Kernel: &recordingKernel{}, TestChannel: unavailableTestChannel{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	server := httptest.NewServer(instance.Handler())
+	t.Cleanup(server.Close)
+
+	before := readPublishedDocument(t, server.URL)
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStarted := clock.Now().Add(-8 * 24 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := database.Exec(`INSERT INTO evaluation_runs(id, status, trigger, started_at, finished_at, publication_result) VALUES ('expired', 'completed', 'manual', ?, ?, 'published')`, oldStarted, oldStarted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful) VALUES ('expired', 'node', 'node', 'failed', 1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+
+	runEvaluation(t, server.URL, map[string]any{})
+	var history []struct {
+		ID string `json:"id"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs", &history)
+	for _, run := range history {
+		if run.ID == "expired" {
+			t.Fatalf("expired Evaluation Run was retained: %+v", history)
+		}
+	}
+	after := readPublishedDocument(t, server.URL)
+	if !bytes.Equal(before, after) {
+		t.Fatal("history cleanup changed the current Publication Snapshot")
+	}
+}
+
+func readPublishedDocument(t *testing.T, baseURL string) []byte {
+	t.Helper()
+	response, err := http.Get(baseURL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	document, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
 func TestManagementPageIsServedByTheRealBackend(t *testing.T) {
 	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
 	server := httptest.NewServer(instance.Handler())
@@ -2129,6 +2307,42 @@ func waitForEvaluationRun(t *testing.T, baseURL string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("evaluation run did not finish")
+}
+
+type testClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []chan time.Time
+}
+
+func newTestClock(now time.Time) *testClock { return &testClock{now: now} }
+func (clock *testClock) Now() time.Time     { clock.mu.Lock(); defer clock.mu.Unlock(); return clock.now }
+func (clock *testClock) After(time.Duration) <-chan time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	timer := make(chan time.Time, 1)
+	clock.timers = append(clock.timers, timer)
+	return timer
+}
+func (clock *testClock) waitForTimerCount(t *testing.T, want int) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		clock.mu.Lock()
+		count := len(clock.timers)
+		clock.mu.Unlock()
+		if count >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("scheduler did not install a timer")
+}
+func (clock *testClock) fireLatest() {
+	clock.mu.Lock()
+	if len(clock.timers) > 0 {
+		clock.timers[len(clock.timers)-1] <- clock.now.Add(time.Minute)
+	}
+	clock.mu.Unlock()
 }
 
 func runEvaluation(t *testing.T, baseURL string, input any) {

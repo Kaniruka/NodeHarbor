@@ -85,6 +85,16 @@ var DefaultAvailabilityURLs = []string{
 	"https://cp.cloudflare.com/generate_204",
 }
 
+type Clock interface {
+	Now() time.Time
+	After(time.Duration) <-chan time.Time
+}
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time                                { return time.Now() }
+func (systemClock) After(duration time.Duration) <-chan time.Time { return time.After(duration) }
+
 func defaultAvailabilityURLsJSON() string {
 	encoded, _ := json.Marshal(DefaultAvailabilityURLs)
 	return string(encoded)
@@ -164,6 +174,7 @@ type Config struct {
 	DatabasePath        string
 	WebAssets           fs.FS
 	EnableTestEndpoints bool
+	Clock               Clock
 }
 
 type Application struct {
@@ -176,9 +187,12 @@ type Application struct {
 	runID              string
 	pendingRun         bool
 	pendingIgnoreCache bool
+	pendingTrigger     string
 	closed             bool
 	lifecycleCtx       context.Context
 	stopScheduler      context.CancelFunc
+	scheduleWake       chan struct{}
+	clock              Clock
 }
 
 type HealthComponent struct {
@@ -208,6 +222,8 @@ type settingsResponse struct {
 	AvailabilityURLs              []string                `json:"availabilityURLs"`
 	EvaluationWorkerCount         int                     `json:"evaluationWorkerCount"`
 	ScoringJitterMS               int                     `json:"scoringJitterMs"`
+	ScoreCacheTTLMinutes          int                     `json:"scoreCacheTTLMinutes"`
+	ListenPort                    int                     `json:"listenPort"`
 	ScoringProviders              []scoringProviderStatus `json:"scoringProviders"`
 }
 
@@ -236,7 +252,11 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	lifecycleCtx, stopScheduler := context.WithCancel(context.Background())
-	application := &Application{database: database, dependencies: dependencies, lifecycleCtx: lifecycleCtx, stopScheduler: stopScheduler}
+	clock := config.Clock
+	if clock == nil {
+		clock = systemClock{}
+	}
+	application := &Application{database: database, dependencies: dependencies, lifecycleCtx: lifecycleCtx, stopScheduler: stopScheduler, scheduleWake: make(chan struct{}, 1), clock: clock}
 	if err := application.initialize(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -293,6 +313,8 @@ func (application *Application) initialize(ctx context.Context) error {
 		"availability_urls":               defaultAvailabilityURLsJSON(),
 		"evaluation_worker_count":         fmt.Sprint(DefaultEvaluationWorkerCount),
 		"scoring_jitter_ms":               fmt.Sprint(int(DefaultScoringJitter / time.Millisecond)),
+		"score_cache_ttl_minutes":         "1440",
+		"listen_port":                     "9876",
 	} {
 		if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)`, key, value); err != nil {
 			return fmt.Errorf("initialize scoring setting: %w", err)
@@ -342,6 +364,8 @@ func (application *Application) routes(config Config) http.Handler {
 	mux.HandleFunc("GET /api/health", application.handleHealth)
 	mux.HandleFunc("GET /api/settings", application.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", application.handlePutSettings)
+	mux.HandleFunc("GET /api/settings/export", application.handleExportSettings)
+	mux.HandleFunc("GET /api/logs", application.handleListLogs)
 	mux.HandleFunc("GET /sub/clash.yaml", application.handlePublishedSubscription)
 	application.registerUpstreamSubscriptionRoutes(mux)
 	application.registerEvaluationRoutes(mux)
@@ -397,6 +421,8 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		AvailabilityURLs              *[]string `json:"availabilityURLs"`
 		EvaluationWorkerCount         *int      `json:"evaluationWorkerCount"`
 		ScoringJitterMS               *int      `json:"scoringJitterMs"`
+		ScoreCacheTTLMinutes          *int      `json:"scoreCacheTTLMinutes"`
+		ListenPort                    *int      `json:"listenPort"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -446,7 +472,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_port": input.ListenPort} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -489,6 +515,14 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 				valid = *number >= 0 && *number <= 1000
 				message = "scoring jitter must be between 0 and 1000 milliseconds"
 			}
+			if name == "score_cache_ttl_minutes" {
+				valid = *number >= 1 && *number <= 10080
+				message = "score cache TTL must be between 1 and 10080 minutes"
+			}
+			if name == "listen_port" {
+				valid = *number >= 1024 && *number <= 65535
+				message = "listen port must be between 1024 and 65535"
+			}
 			if !valid {
 				writeError(response, http.StatusBadRequest, errors.New(message))
 				return
@@ -520,6 +554,10 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			writeError(response, http.StatusInternalServerError, err)
 			return
 		}
+	}
+	select {
+	case application.scheduleWake <- struct{}{}:
+	default:
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -570,6 +608,12 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 		return result, err
 	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_jitter_ms'`).Scan(&result.ScoringJitterMS); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'score_cache_ttl_minutes'`).Scan(&result.ScoreCacheTTLMinutes); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'listen_port'`).Scan(&result.ListenPort); err != nil {
 		return result, err
 	}
 	providerStatuses, err := application.readScoringProviderStatuses(ctx)

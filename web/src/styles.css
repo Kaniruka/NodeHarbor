@@ -427,3 +427,9 @@ button:focus-visible, a:focus-visible {
 .providerStatuses strong { color: var(--text, #111827); }
 .providerStatuses small { overflow-wrap: anywhere; }
 .nodeResult--accepted { border-left: 3px solid #16a34a; }
+.historyList, .historyLogs { display: grid; gap: .5rem; margin-top: 1rem; }
+.historyItem { display: grid; gap: .35rem; padding: .75rem; border: 1px solid rgba(151, 190, 207, 0.12); border-radius: .6rem; background: rgba(4, 20, 31, 0.42); }
+.historySummary { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; }
+.historySummary span, .historyItem small, .historyLogs small { color: #819eae; overflow-wrap: anywhere; }
+.historyLogs { padding-top: .75rem; border-top: 1px solid rgba(151, 190, 207, 0.12); }
+.historyLogs h3 { margin: 0; font-size: .95rem; }

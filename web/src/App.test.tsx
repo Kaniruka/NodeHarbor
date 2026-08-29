@@ -214,6 +214,34 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
   await userEvent.click(screen.getByRole("button", { name: "保存评分设置" }));
 });
 
+test("History shows durable run diagnostics and links to configuration export", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json({
+      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70,
+      evaluationIntervalMinutes: 360, historyRetentionDays: 7, scoreCacheTTLMinutes: 1440, listenPort: 9876,
+      availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5, availabilityMaxLatencyMs: 1500,
+      availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
+    });
+    if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
+    if (url.endsWith("/api/evaluation-runs")) return Response.json([{
+      id: "run-1", trigger: "scheduled", phase: "", status: "completed", startedAt: "2026-08-29T00:00:00Z", finishedAt: "2026-08-29T00:00:02Z", durationMs: 2000,
+      total: 4, passed: 3, failed: 1, publicationResult: "published", failureSummary: "one node failed",
+      phases: [{ name: "refresh", status: "completed", durationMs: 200 }, { name: "publication", status: "completed", durationMs: 300 }], results: [],
+    }]);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "History" })).toBeInTheDocument();
+  expect(screen.getByText(/scheduled/)).toBeInTheDocument();
+  expect(screen.getByText(/2s/)).toBeInTheDocument();
+  expect(screen.getByText(/published/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Export configuration JSON" })).toHaveAttribute("href", "/api/settings/export");
+});
+
 test("WebUI blocks an eleventh Upstream Subscription with a clear message", async () => {
   const sources = Array.from({ length: 10 }, (_, index) => ({
     id: `source-${index}`,

@@ -20,14 +20,33 @@ import (
 )
 
 type evaluationRun struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`
-	StartedAt  string `json:"startedAt"`
-	FinishedAt string `json:"finishedAt,omitempty"`
-	Total      int    `json:"total"`
-	Passed     int    `json:"passed"`
-	Failed     int    `json:"failed"`
-	Reason     string `json:"reason,omitempty"`
+	ID                string  `json:"id"`
+	Status            string  `json:"status"`
+	Trigger           string  `json:"trigger"`
+	Phase             string  `json:"phase,omitempty"`
+	StartedAt         string  `json:"startedAt"`
+	FinishedAt        string  `json:"finishedAt,omitempty"`
+	DurationMS        float64 `json:"durationMs"`
+	Total             int     `json:"total"`
+	Passed            int     `json:"passed"`
+	Failed            int     `json:"failed"`
+	PublicationResult string  `json:"publicationResult"`
+	Reason            string  `json:"reason,omitempty"`
+	FailureSummary    string  `json:"failureSummary,omitempty"`
+}
+type evaluationPhase struct {
+	Name       string  `json:"name"`
+	Status     string  `json:"status"`
+	StartedAt  string  `json:"startedAt"`
+	FinishedAt string  `json:"finishedAt,omitempty"`
+	DurationMS float64 `json:"durationMs"`
+	Reason     string  `json:"reason,omitempty"`
+}
+type evaluationLog struct {
+	Timestamp string `json:"timestamp"`
+	Level     string `json:"level"`
+	RunID     string `json:"runId,omitempty"`
+	Message   string `json:"message"`
 }
 type evaluationNodeResult struct {
 	NodeID          string         `json:"nodeId"`
@@ -47,6 +66,7 @@ type evaluationRunResponse struct {
 	evaluationRun
 	Results []evaluationNodeResult  `json:"results"`
 	Sources []evaluationSourceState `json:"sources"`
+	Phases  []evaluationPhase       `json:"phases"`
 }
 type evaluationSourceState struct {
 	ID             string `json:"sourceId"`
@@ -72,6 +92,7 @@ type availabilityConfig struct {
 	urls              []string
 	workerCount       int
 	scoringJitter     time.Duration
+	scoreCacheTTL     time.Duration
 }
 
 var errScoringProviderUnavailable = errors.New("scoring provider unavailable")
@@ -89,8 +110,9 @@ func (application *Application) readAvailabilityConfig(ctx context.Context) (ava
 		urls:              append([]string(nil), settings.AvailabilityURLs...),
 		workerCount:       settings.EvaluationWorkerCount,
 		scoringJitter:     time.Duration(settings.ScoringJitterMS) * time.Millisecond,
+		scoreCacheTTL:     time.Duration(settings.ScoreCacheTTLMinutes) * time.Minute,
 	}
-	if config.attempts < 1 || config.requiredSuccesses < 1 || config.requiredSuccesses > config.attempts || config.timeout <= 0 || config.maxLatency <= 0 || len(config.urls) == 0 || config.workerCount < 1 || config.workerCount > 3 || config.scoringJitter < 0 {
+	if config.attempts < 1 || config.requiredSuccesses < 1 || config.requiredSuccesses > config.attempts || config.timeout <= 0 || config.maxLatency <= 0 || len(config.urls) == 0 || config.workerCount < 1 || config.workerCount > 3 || config.scoringJitter < 0 || config.scoreCacheTTL <= 0 {
 		return availabilityConfig{}, errors.New("invalid Availability Check settings")
 	}
 	return config, nil
@@ -98,10 +120,12 @@ func (application *Application) readAvailabilityConfig(ctx context.Context) (ava
 
 func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'manual', phase TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, publication_result TEXT NOT NULL DEFAULT 'not_attempted', reason TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, score_source TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
 		`CREATE TABLE IF NOT EXISTS evaluation_sources (run_id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, enabled INTEGER NOT NULL, refresh_status TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '', last_success_at TEXT NOT NULL DEFAULT '', proxy_node_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, source_id))`,
 		`CREATE TABLE IF NOT EXISTS score_cache (provider TEXT NOT NULL, exit_identity TEXT NOT NULL, score REAL NOT NULL, address_family TEXT NOT NULL, scored_at TEXT NOT NULL, PRIMARY KEY(provider, exit_identity))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_phases (run_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, name))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL, level TEXT NOT NULL, message TEXT NOT NULL)`,
 	}
 	for _, statement := range statements {
 		if _, err := application.database.ExecContext(ctx, statement); err != nil {
@@ -167,6 +191,21 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 	if err := runRows.Close(); err != nil {
 		return err
 	}
+	if !runColumns["trigger"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'`); err != nil {
+			return err
+		}
+	}
+	if !runColumns["phase"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_runs ADD COLUMN phase TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !runColumns["publication_result"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_runs ADD COLUMN publication_result TEXT NOT NULL DEFAULT 'not_attempted'`); err != nil {
+			return err
+		}
+	}
 	if !runColumns["reason"] {
 		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_runs ADD COLUMN reason TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
@@ -182,8 +221,56 @@ func (application *Application) registerEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/evaluation-runs/{id}", application.handleGetEvaluationRun)
 }
 
+func (application *Application) handleExportSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := application.readSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (application *Application) handleListLogs(w http.ResponseWriter, r *http.Request) {
+	rows, err := application.database.QueryContext(r.Context(), `SELECT timestamp, level, run_id, message FROM evaluation_logs ORDER BY id DESC LIMIT 200`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	logs := make([]evaluationLog, 0)
+	for rows.Next() {
+		var item evaluationLog
+		if err := rows.Scan(&item.Timestamp, &item.Level, &item.RunID, &item.Message); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		logs = append(logs, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, logs)
+}
+
+func (application *Application) logEvaluation(ctx context.Context, runID, level, message string) {
+	_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_logs(run_id, timestamp, level, message) VALUES (?, ?, ?, ?)`, runID, application.clock.Now().UTC().Format(time.RFC3339Nano), level, message)
+}
+
+func (application *Application) beginEvaluationPhase(ctx context.Context, runID, name string) {
+	now := application.clock.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_phases(run_id, name, status, started_at) VALUES (?, ?, 'running', ?) ON CONFLICT(run_id, name) DO UPDATE SET status = 'running', started_at = excluded.started_at, finished_at = '', reason = ''`, runID, name, now)
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET phase = ? WHERE id = ?`, name, runID)
+	application.logEvaluation(ctx, runID, "info", "phase started: "+name)
+}
+
+func (application *Application) finishEvaluationPhase(ctx context.Context, runID, name, status, reason string) {
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_phases SET status = ?, finished_at = ?, reason = ? WHERE run_id = ? AND name = ?`, status, application.clock.Now().UTC().Format(time.RFC3339Nano), reason, runID, name)
+	application.logEvaluation(ctx, runID, "info", "phase "+status+": "+name)
+}
+
 func (application *Application) handleListEvaluationRuns(w http.ResponseWriter, r *http.Request) {
-	rows, err := application.database.QueryContext(r.Context(), `SELECT id, status, started_at, finished_at, total, passed, failed, reason FROM evaluation_runs ORDER BY started_at DESC LIMIT 50`)
+	rows, err := application.database.QueryContext(r.Context(), `SELECT id, status, trigger, phase, started_at, finished_at, total, passed, failed, publication_result, reason FROM evaluation_runs ORDER BY started_at DESC LIMIT 50`)
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -192,7 +279,7 @@ func (application *Application) handleListEvaluationRuns(w http.ResponseWriter, 
 	result := make([]evaluationRunResponse, 0)
 	for rows.Next() {
 		var run evaluationRun
-		if err := rows.Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.Reason); err != nil {
+		if err := rows.Scan(&run.ID, &run.Status, &run.Trigger, &run.Phase, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.PublicationResult, &run.Reason); err != nil {
 			writeError(w, 500, err)
 			return
 		}
@@ -216,7 +303,7 @@ func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, 
 			return
 		}
 	}
-	run, accepted, err := application.startEvaluationRun(r.Context(), input.IgnoreCache)
+	run, accepted, err := application.startEvaluationRun(r.Context(), input.IgnoreCache, "manual")
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -225,7 +312,7 @@ func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, 
 	_ = accepted
 }
 
-func (application *Application) startEvaluationRun(ctx context.Context, ignoreCache bool) (evaluationRunResponse, bool, error) {
+func (application *Application) startEvaluationRun(ctx context.Context, ignoreCache bool, trigger string) (evaluationRunResponse, bool, error) {
 	application.evaluationMu.Lock()
 	if application.closed {
 		application.evaluationMu.Unlock()
@@ -234,6 +321,7 @@ func (application *Application) startEvaluationRun(ctx context.Context, ignoreCa
 	if application.runID != "" {
 		id := application.runID
 		application.pendingRun = true
+		application.pendingTrigger = "coalesced"
 		application.pendingIgnoreCache = application.pendingIgnoreCache || ignoreCache
 		application.evaluationMu.Unlock()
 		run, err := application.readEvaluationRun(ctx, id)
@@ -244,8 +332,8 @@ func (application *Application) startEvaluationRun(ctx context.Context, ignoreCa
 		application.evaluationMu.Unlock()
 		return evaluationRunResponse{}, false, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, id, now); err != nil {
+	now := application.clock.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, trigger, started_at) VALUES (?, 'running', ?, ?)`, id, trigger, now); err != nil {
 		application.evaluationMu.Unlock()
 		return evaluationRunResponse{}, false, err
 	}
@@ -270,7 +358,7 @@ func (application *Application) handleCurrentEvaluationRun(w http.ResponseWriter
 		return
 	}
 	var run evaluationRun
-	err := application.database.QueryRowContext(r.Context(), `SELECT id, status, started_at, finished_at, total, passed, failed, reason FROM evaluation_runs ORDER BY started_at DESC LIMIT 1`).Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.Reason)
+	err := application.database.QueryRowContext(r.Context(), `SELECT id, status, trigger, phase, started_at, finished_at, total, passed, failed, publication_result, reason FROM evaluation_runs ORDER BY started_at DESC LIMIT 1`).Scan(&run.ID, &run.Status, &run.Trigger, &run.Phase, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.PublicationResult, &run.Reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, 200, evaluationRunResponse{evaluationRun: evaluationRun{Status: "idle"}, Results: []evaluationNodeResult{}})
 		return
@@ -297,14 +385,28 @@ func (application *Application) handleGetEvaluationRun(w http.ResponseWriter, r 
 
 func (application *Application) readEvaluationRun(ctx context.Context, id string) (evaluationRunResponse, error) {
 	var run evaluationRun
-	if err := application.database.QueryRowContext(ctx, `SELECT id, status, started_at, finished_at, total, passed, failed, reason FROM evaluation_runs WHERE id = ?`, id).Scan(&run.ID, &run.Status, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.Reason); err != nil {
+	if err := application.database.QueryRowContext(ctx, `SELECT id, status, trigger, phase, started_at, finished_at, total, passed, failed, publication_result, reason FROM evaluation_runs WHERE id = ?`, id).Scan(&run.ID, &run.Status, &run.Trigger, &run.Phase, &run.StartedAt, &run.FinishedAt, &run.Total, &run.Passed, &run.Failed, &run.PublicationResult, &run.Reason); err != nil {
 		return evaluationRunResponse{}, err
 	}
 	return application.runResponse(ctx, run), nil
 }
 
 func (application *Application) runResponse(ctx context.Context, run evaluationRun) evaluationRunResponse {
-	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}, Sources: []evaluationSourceState{}}
+	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}, Sources: []evaluationSourceState{}, Phases: []evaluationPhase{}}
+	result.FailureSummary = run.Reason
+	started, startErr := time.Parse(time.RFC3339Nano, run.StartedAt)
+	if startErr == nil {
+		end := application.clock.Now().UTC()
+		if run.FinishedAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, run.FinishedAt); err == nil {
+				end = parsed
+			}
+		}
+		if end.Before(started) {
+			end = started
+		}
+		result.DurationMS = end.Sub(started).Seconds() * 1000
+	}
 	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
 	if err == nil {
 		for rows.Next() {
@@ -328,6 +430,27 @@ func (application *Application) runResponse(ctx context.Context, run evaluationR
 			result.Sources = append(result.Sources, source)
 		}
 	}
+	phaseRows, err := application.database.QueryContext(ctx, `SELECT name, status, started_at, finished_at, reason FROM evaluation_phases WHERE run_id = ? ORDER BY started_at`, run.ID)
+	if err == nil {
+		defer phaseRows.Close()
+		for phaseRows.Next() {
+			var phase evaluationPhase
+			if phaseRows.Scan(&phase.Name, &phase.Status, &phase.StartedAt, &phase.FinishedAt, &phase.Reason) != nil {
+				continue
+			}
+			phaseStart, startErr := time.Parse(time.RFC3339Nano, phase.StartedAt)
+			phaseEnd := application.clock.Now().UTC()
+			if phase.FinishedAt != "" {
+				if parsed, parseErr := time.Parse(time.RFC3339Nano, phase.FinishedAt); parseErr == nil {
+					phaseEnd = parsed
+				}
+			}
+			if startErr == nil && !phaseEnd.Before(phaseStart) {
+				phase.DurationMS = phaseEnd.Sub(phaseStart).Seconds() * 1000
+			}
+			result.Phases = append(result.Phases, phase)
+		}
+	}
 	return result
 }
 
@@ -345,13 +468,17 @@ func (application *Application) recordEvaluationSourceStates(ctx context.Context
 }
 
 func (application *Application) executeEvaluationRun(ctx context.Context, id string, ignoreCache bool) {
+	application.logEvaluation(ctx, id, "info", "Evaluation Run started")
+	application.beginEvaluationPhase(ctx, id, "refresh")
 	defer func() {
 		application.cleanupEvaluationHistory(ctx)
 		application.evaluationMu.Lock()
 		pending := application.pendingRun
 		pendingIgnoreCache := application.pendingIgnoreCache
+		pendingTrigger := application.pendingTrigger
 		application.pendingRun = false
 		application.pendingIgnoreCache = false
+		application.pendingTrigger = ""
 		if pending {
 			if application.lifecycleCtx.Err() != nil || application.closed {
 				application.runID = ""
@@ -360,8 +487,8 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			}
 			nextID, err := randomID()
 			if err == nil {
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, nextID, now); err == nil {
+				now := application.clock.Now().UTC().Format(time.RFC3339Nano)
+				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, trigger, started_at) VALUES (?, 'running', ?, ?)`, nextID, pendingTrigger, now); err == nil {
 					application.runID = nextID
 					application.launchEvaluationRunLocked(nextID, pendingIgnoreCache)
 					application.evaluationMu.Unlock()
@@ -386,6 +513,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			if reason == "" {
 				reason = "Surfing isolation could not be proven"
 			}
+			application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
 			application.pauseEvaluationRun(ctx, id, reason)
 			return
 		}
@@ -406,6 +534,8 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, errors.New("all Upstream Subscriptions failed to refresh"))
 		return
 	}
+	application.finishEvaluationPhase(ctx, id, "refresh", "completed", "")
+	application.beginEvaluationPhase(ctx, id, "availability-and-scoring")
 	nodes, err := application.evaluationNodes(ctx)
 	if err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
@@ -475,14 +605,24 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		return
 	}
 	if len(nodes) > 0 && passed == 0 {
+		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "no Qualified Nodes")
+		application.setPublicationResult(ctx, id, "retained")
 		application.completeEvaluationRunWithReason(ctx, id, len(nodes), passed, failed, "no Qualified Nodes; previous Publication Snapshot retained")
 		return
 	}
 	if passed > 0 {
+		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
+		application.beginEvaluationPhase(ctx, id, "publication")
 		if err := application.publishQualifiedNodes(ctx, id); err != nil {
+			application.setPublicationResult(ctx, id, "failed")
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
 			return
 		}
+		application.finishEvaluationPhase(ctx, id, "publication", "completed", "")
+		application.setPublicationResult(ctx, id, "published")
+	} else {
+		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
+		application.setPublicationResult(ctx, id, "retained")
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
 }
@@ -563,11 +703,13 @@ func (application *Application) evaluationRunStartedAt(ctx context.Context, id s
 			return parsed
 		}
 	}
-	return time.Now().UTC()
+	return application.clock.Now().UTC()
 }
 
 func (application *Application) pauseEvaluationRun(ctx context.Context, id, reason string) {
-	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = 'paused', reason = ?, finished_at = ? WHERE id = ?`, reason, time.Now().UTC().Format(time.RFC3339Nano), id)
+	application.finishRunningPhases(ctx, id, "paused", reason)
+	application.setPublicationResult(ctx, id, "retained")
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = 'paused', reason = ?, finished_at = ?, phase = '' WHERE id = ?`, reason, application.clock.Now().UTC().Format(time.RFC3339Nano), id)
 }
 
 func (application *Application) runScheduler() {
@@ -578,17 +720,18 @@ func (application *Application) runScheduler() {
 			select {
 			case <-application.lifecycleCtx.Done():
 				return
-			case <-time.After(time.Minute):
+			case <-application.scheduleWake:
 				continue
 			}
 		}
-		timer := time.NewTimer(time.Duration(minutes) * time.Minute)
+		timer := application.clock.After(time.Duration(minutes) * time.Minute)
 		select {
 		case <-application.lifecycleCtx.Done():
-			timer.Stop()
 			return
-		case <-timer.C:
-			_, _, _ = application.startEvaluationRun(application.lifecycleCtx, false)
+		case <-application.scheduleWake:
+			continue
+		case <-timer:
+			_, _, _ = application.startEvaluationRun(application.lifecycleCtx, false, "scheduled")
 		}
 	}
 }
@@ -599,8 +742,12 @@ func (application *Application) cleanupEvaluationHistory(ctx context.Context) {
 	if days < 3 || days > 7 {
 		days = 7
 	}
-	_, _ = application.database.ExecContext(ctx, `DELETE FROM evaluation_results WHERE run_id IN (SELECT id FROM evaluation_runs WHERE julianday(started_at) < julianday('now', ?))`, fmt.Sprintf("-%d days", days))
-	_, _ = application.database.ExecContext(ctx, `DELETE FROM evaluation_runs WHERE julianday(started_at) < julianday('now', ?)`, fmt.Sprintf("-%d days", days))
+	cutoff := application.clock.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
+	query := `DELETE FROM %s WHERE run_id IN (SELECT id FROM evaluation_runs WHERE started_at < ? AND status <> 'running')`
+	for _, table := range []string{"evaluation_results", "evaluation_sources", "evaluation_phases", "evaluation_logs"} {
+		_, _ = application.database.ExecContext(ctx, fmt.Sprintf(query, table), cutoff)
+	}
+	_, _ = application.database.ExecContext(ctx, `DELETE FROM evaluation_runs WHERE started_at < ? AND status <> 'running'`, cutoff)
 }
 
 func (application *Application) publishQualifiedNodes(ctx context.Context, runID string) error {
@@ -663,6 +810,7 @@ func (application *Application) finishEvaluationRun(ctx context.Context, id stri
 		status = "failed"
 		reason = runErr.Error()
 	}
+	application.finishRunningPhases(ctx, id, status, reason)
 	application.writeEvaluationRunResult(ctx, id, total, passed, failed, status, reason)
 }
 
@@ -676,7 +824,16 @@ func (application *Application) writeEvaluationRunResult(ctx context.Context, id
 		reason = fmt.Sprintf("evaluation interrupted: %v", ctx.Err())
 		ctx = context.Background()
 	}
-	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, reason = ?, finished_at = ? WHERE id = ?`, status, total, passed, failed, reason, time.Now().UTC().Format(time.RFC3339Nano), id)
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, reason = ?, finished_at = ?, phase = '' WHERE id = ?`, status, total, passed, failed, reason, application.clock.Now().UTC().Format(time.RFC3339Nano), id)
+	application.logEvaluation(ctx, id, "info", "Evaluation Run "+status)
+}
+
+func (application *Application) finishRunningPhases(ctx context.Context, runID, status, reason string) {
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_phases SET status = ?, finished_at = ?, reason = ? WHERE run_id = ? AND status = 'running'`, status, application.clock.Now().UTC().Format(time.RFC3339Nano), reason, runID)
+}
+
+func (application *Application) setPublicationResult(ctx context.Context, runID, result string) {
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET publication_result = ? WHERE id = ?`, result, runID)
 }
 
 func (application *Application) evaluationNodes(ctx context.Context) ([]evaluationNode, error) {
@@ -788,7 +945,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
 		return result
 	}
-	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache, runStartedAt)
+	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, config.scoreCacheTTL, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
 		if errors.Is(err, errScoringProviderUnavailable) {
@@ -934,7 +1091,7 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 	return value
 }
 
-func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool, runStartedAt time.Time) (float64, string, string, error) {
+func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter, cacheTTL time.Duration, ignoreCache bool, runStartedAt time.Time) (float64, string, string, error) {
 	providerValue, err := application.configuredScoringProvider(ctx)
 	if err != nil {
 		return 0, addressFamily(exitIdentity), "", fmt.Errorf("%w: %w", errScoringProviderUnavailable, err)
@@ -943,7 +1100,7 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 	if !ok {
 		return 0, addressFamily(exitIdentity), "", errors.New("Scoring Provider cannot bind requests to the verified Test Channel")
 	}
-	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, ignoreCache, runStartedAt, func() (float64, error) {
+	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, cacheTTL, ignoreCache, runStartedAt, func() (float64, error) {
 		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
 		if !hasTransport {
 			return 0, errors.New("Test Channel cannot provide scoring transport")
@@ -1000,7 +1157,7 @@ func medianLatency(values []time.Duration) time.Duration {
 	return sorted[middle-1] + (sorted[middle]-sorted[middle-1])/2
 }
 
-func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, ignoreCache bool, runStartedAt time.Time, scoreProvider func() (float64, error)) (float64, string, string, error) {
+func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, cacheTTL time.Duration, ignoreCache bool, runStartedAt time.Time, scoreProvider func() (float64, error)) (float64, string, string, error) {
 	application.scoreCacheMu.Lock()
 	defer application.scoreCacheMu.Unlock()
 	family := addressFamily(exitIdentity)
@@ -1014,7 +1171,10 @@ func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIde
 	if err == nil {
 		when, parseErr := time.Parse(time.RFC3339Nano, scoredAt)
 		now := time.Now().UTC()
-		cacheIsFresh := parseErr == nil && !when.After(now) && now.Sub(when) <= 24*time.Hour
+		if cacheTTL <= 0 {
+			cacheTTL = 24 * time.Hour
+		}
+		cacheIsFresh := parseErr == nil && !when.After(now) && now.Sub(when) <= cacheTTL
 		cacheWasWrittenThisRun := ignoreCache && parseErr == nil && !when.Before(runStartedAt) && !when.After(now)
 		if cacheIsFresh && (!ignoreCache || cacheWasWrittenThisRun) {
 			return score, family, "cache", nil
@@ -1024,7 +1184,7 @@ func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIde
 	if err != nil {
 		return 0, family, "", err
 	}
-	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, providerKey, exitIdentity, score, family, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, providerKey, exitIdentity, score, family, application.clock.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, family, "", fmt.Errorf("store IP Score cache: %w", err)
 	}

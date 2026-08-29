@@ -64,6 +64,20 @@ const messages = {
     scoringJitter: "评分抖动上限（毫秒）",
     saveAvailabilitySettings: "保存可用性设置",
     probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} 次探测成功`,
+    history: "运行历史",
+    historyHint: "查看保留窗口内的 Evaluation Run 和诊断信息",
+    exportConfig: "导出配置 JSON",
+    trigger: "触发",
+    phase: "阶段",
+    duration: "耗时",
+    publicationResult: "发布结果",
+    failureSummary: "失败摘要",
+    published: "已发布",
+    retained: "保留上一版本",
+    notAttempted: "未尝试",
+    logs: "日志与诊断",
+    cacheTTL: "评分缓存期限（分钟）",
+    listenPort: "管理端口",
   },
   en: {
     eyebrow: "Local proxy subscription curator",
@@ -116,6 +130,20 @@ const messages = {
     scoringJitter: "Scoring jitter limit (ms)",
     saveAvailabilitySettings: "Save Availability Check settings",
     probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} probes succeeded`,
+    history: "History",
+    historyHint: "Retained Evaluation Runs and diagnostics",
+    exportConfig: "Export configuration JSON",
+    trigger: "Trigger",
+    phase: "Phase",
+    duration: "Duration",
+    publicationResult: "Publication",
+    failureSummary: "Failure summary",
+    published: "published",
+    retained: "previous snapshot retained",
+    notAttempted: "not attempted",
+    logs: "Logs and diagnostics",
+    cacheTTL: "Score cache TTL (minutes)",
+    listenPort: "Management port",
   },
 } as const;
 
@@ -220,6 +248,8 @@ export default function App() {
 
       <EvaluationRun locale={locale} text={text} />
 
+      <EvaluationHistory text={text} />
+
       <section className="subscriptionCard" aria-labelledby="subscription-heading">
         <div>
           <h2 id="subscription-heading">{text.subscription}</h2>
@@ -255,6 +285,8 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
   const [availabilityURLs, setAvailabilityURLs] = useState("");
   const [workers, setWorkers] = useState(3);
   const [scoringJitter, setScoringJitter] = useState(100);
+  const [cacheTTL, setCacheTTL] = useState(1440);
+  const [listenPort, setListenPort] = useState(9876);
   useEffect(() => {
     let active = true;
     const load = () => fetch("/api/evaluation-runs/current").then(requireOK).then((response) => response.json()).then((value) => { if (active && Array.isArray(value.results) && typeof value.status === "string") setRun({ ...value, results: value.results }); }).catch(() => undefined);
@@ -262,13 +294,13 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     const timer = window.setInterval(load, 1000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
-  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { const selectedProvider: ProviderName = settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"; setProvider(selectedProvider); setThresholds({ iplark: typeof settings.iplarkThreshold === "number" ? settings.iplarkThreshold : 70, ipcheck: typeof settings.ipcheckThreshold === "number" ? settings.ipcheckThreshold : 70 }); setProviderStatuses(Array.isArray(settings.scoringProviders) ? settings.scoringProviders : []); setInterval(settings.evaluationIntervalMinutes || 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); }).catch(() => undefined); }, []);
+  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { const selectedProvider: ProviderName = settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"; setProvider(selectedProvider); setThresholds({ iplark: typeof settings.iplarkThreshold === "number" ? settings.iplarkThreshold : 70, ipcheck: typeof settings.ipcheckThreshold === "number" ? settings.ipcheckThreshold : 70 }); setProviderStatuses(Array.isArray(settings.scoringProviders) ? settings.scoringProviders : []); setInterval(typeof settings.evaluationIntervalMinutes === "number" ? settings.evaluationIntervalMinutes : 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); setCacheTTL(settings.scoreCacheTTLMinutes || 1440); setListenPort(settings.listenPort || 9876); }).catch(() => undefined); }, []);
   async function start() {
     setBusy(true);
     try { const response = await fetch("/api/evaluation-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ignoreCache }) }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
   }
   async function saveScoringSettings() {
-    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, iplarkThreshold: thresholds.iplark, ipcheckThreshold: thresholds.ipcheck, evaluationIntervalMinutes: interval, historyRetentionDays: retention }) }).then(requireOK);
+    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, iplarkThreshold: thresholds.iplark, ipcheckThreshold: thresholds.ipcheck, evaluationIntervalMinutes: interval, historyRetentionDays: retention, scoreCacheTTLMinutes: cacheTTL, listenPort }) }).then(requireOK);
   }
   async function saveAvailabilitySettings() {
     await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availabilityAttempts: attempts, availabilityRequiredSuccesses: requiredSuccesses, availabilityTimeoutSeconds: timeoutSeconds, availabilityMaxLatencyMs: maxLatency, availabilityURLs: availabilityURLs.split(",").map((value) => value.trim()).filter(Boolean), evaluationWorkerCount: workers, scoringJitterMs: scoringJitter }) }).then(requireOK);
@@ -278,12 +310,55 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
     <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} onChange={(event) => setProvider(event.target.value as ProviderName)}><option value="iplark">{text.iplark}</option><option value="ipcheck">{text.ipcheck}</option></select></label><label><span>{text.iplarkThreshold}</span><input type="number" min="0" max="100" value={thresholds.iplark} onChange={(event) => setThresholds((current) => ({ ...current, iplark: Number(event.target.value) }))} /></label><label><span>{text.ipcheckThreshold}</span><input type="number" min="0" max="100" value={thresholds.ipcheck} onChange={(event) => setThresholds((current) => ({ ...current, ipcheck: Number(event.target.value) }))} /></label><label><input type="checkbox" checked={ignoreCache} onChange={(event) => setIgnoreCache(event.target.checked)} />{text.ignoreCache}</label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
     {providerStatuses.length > 0 && <div className="providerStatuses" aria-label={text.provider}><strong>{text.provider}</strong>{providerStatuses.map((status) => <small key={status.name}>{status.name === "ipcheck" ? text.ipcheck : text.iplark}: {status.enabled ? (status.failureStatus ? text.providerUnavailable : text.providerReady) : text.providerDisabled}{status.failureStatus ? ` · ${status.failureStatus}` : ""}</small>)}</div>}
-     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label></div>
+     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label><label><span>{text.cacheTTL}</span><input type="number" min="1" value={cacheTTL} onChange={(event) => setCacheTTL(Number(event.target.value))} /></label><label><span>{text.listenPort}</span><input type="number" min="1024" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /></label></div>
      <div className="evaluationSettings"><label><span>{text.availabilityAttempts}</span><input type="number" min="1" max="10" value={attempts} onChange={(event) => setAttempts(Number(event.target.value))} /></label><label><span>{text.availabilityRequired}</span><input type="number" min="1" max="10" value={requiredSuccesses} onChange={(event) => setRequiredSuccesses(Number(event.target.value))} /></label><label><span>{text.availabilityTimeout}</span><input type="number" min="1" max="300" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label></div>
      <div className="evaluationSettings"><label><span>{text.availabilityMaxLatency}</span><input type="number" min="1" max="60000" value={maxLatency} onChange={(event) => setMaxLatency(Number(event.target.value))} /></label><label><span>{text.availabilityURLs}</span><input type="text" value={availabilityURLs} onChange={(event) => setAvailabilityURLs(event.target.value)} /></label><label><span>{text.evaluationWorkers}</span><input type="number" min="1" max="3" value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></label><label><span>{text.scoringJitter}</span><input type="number" min="0" max="1000" value={scoringJitter} onChange={(event) => setScoringJitter(Number(event.target.value))} /></label><button type="button" onClick={saveAvailabilitySettings}>{text.saveAvailabilitySettings}</button></div>
      {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
     {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong><small>{text.probeSuccess(result.successful, result.attempts)}</small>{result.scoreSource && <small>{result.scoreSource === "cache" ? text.scoreCache : text.scoreProvider}</small>}{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
+}
+
+type HistoryRun = {
+  id: string;
+  trigger: string;
+  status: string;
+  durationMs: number;
+  total: number;
+  passed: number;
+  failed: number;
+  publicationResult?: string;
+  failureSummary?: string;
+  phases: Array<{ name: string; status: string; durationMs: number }>;
+};
+
+function EvaluationHistory({ text }: { text: EvaluationText }) {
+  const [runs, setRuns] = useState<HistoryRun[]>([]);
+  const [logs, setLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
+  useEffect(() => {
+    let active = true;
+    fetch("/api/evaluation-runs").then(requireOK).then((response) => response.json()).then((history) => {
+      if (active && Array.isArray(history)) setRuns(history);
+    }).catch(() => undefined);
+    fetch("/api/logs").then(requireOK).then((response) => response.json()).then((diagnostics) => {
+      if (active && Array.isArray(diagnostics)) setLogs(diagnostics.slice(0, 8));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+  return <section className="panel" aria-labelledby="history-heading">
+    <div className="panelHeading"><div><h2 id="history-heading">{text.history}</h2><p>{text.historyHint}</p></div><a className="secondaryButton" href="/api/settings/export" download="nodeharbor-settings.json">{text.exportConfig}</a></div>
+    {runs.length === 0 ? <p className="emptyState">—</p> : <div className="historyList">{runs.map((run) => <article className="historyItem" key={run.id}>
+      <div className="historySummary"><strong>{run.trigger}</strong><span>{run.status}</span><span>{formatDuration(run.durationMs)}</span><span>{run.passed} / {run.total}</span><span>{run.publicationResult ?? text.notAttempted}</span></div>
+      <small>{text.phase}: {run.phases.map((phase) => `${phase.name} (${formatDuration(phase.durationMs)})`).join(" · ") || "—"}</small>
+      {run.failureSummary && <small>{text.failureSummary}: {run.failureSummary}</small>}
+    </article>)}</div>}
+    <div className="historyLogs"><h3>{text.logs}</h3>{logs.length === 0 ? <p className="emptyState">—</p> : logs.map((log, index) => <small key={`${log.timestamp}-${index}`}>{log.level}: {log.message}</small>)}</div>
+  </section>;
+}
+
+function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "—";
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  return `${Math.round(durationMs / 1000)}s`;
 }
 
 function HealthCard({ label, state, statusLabel }: { label: string; state: HealthState; statusLabel: string }) {
