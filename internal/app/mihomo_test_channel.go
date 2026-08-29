@@ -289,12 +289,34 @@ func listenerOwnedBy(ctx context.Context, address string, pid int) (bool, error)
 		return false, nil
 	}
 	if output, err := exec.CommandContext(ctx, "ss", "-ltnpH").Output(); err == nil {
-		return strings.Contains(string(output), ":"+port) && strings.Contains(string(output), fmt.Sprintf("pid=%d", pid)), nil
+		return socketTableHasOwner(string(output), port, pid), nil
 	}
 	if output, err := exec.CommandContext(ctx, "netstat", "-ltnp").Output(); err == nil {
-		return strings.Contains(string(output), ":"+port) && strings.Contains(string(output), fmt.Sprintf("/%d", pid)), nil
+		return socketTableHasOwner(string(output), port, pid), nil
 	}
 	return false, errors.New("verify Mihomo Test Channel ownership: no socket ownership inspector is available")
+}
+
+func socketTableHasOwner(output, port string, pid int) bool {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || !strings.HasSuffix(fields[3], ":"+port) {
+			continue
+		}
+		if marker := strings.Index(line, "pid="); marker >= 0 {
+			value := line[marker+len("pid="):]
+			end := strings.IndexFunc(value, func(r rune) bool { return r < '0' || r > '9' })
+			if end >= 0 {
+				value = value[:end]
+			}
+			return value == fmt.Sprint(pid)
+		}
+		last := fields[len(fields)-1]
+		if slash := strings.IndexByte(last, '/'); slash >= 0 && last[:slash] == fmt.Sprint(pid) {
+			return true
+		}
+	}
+	return false
 }
 
 func freeLoopbackPort() (int, error) {

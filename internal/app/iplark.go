@@ -122,7 +122,7 @@ func containsFailureMarker(value any) bool {
 	case map[string]any:
 		for key, child := range item {
 			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
-			if normalized == "error" || normalized == "captcha" || normalized == "challenge" {
+			if strings.Contains(normalized, "error") || strings.Contains(normalized, "captcha") || strings.Contains(normalized, "challenge") {
 				return true
 			}
 			if containsFailureMarker(child) {
@@ -132,6 +132,13 @@ func containsFailureMarker(value any) bool {
 	case []any:
 		for _, child := range item {
 			if containsFailureMarker(child) {
+				return true
+			}
+		}
+	case string:
+		content := strings.ToLower(item)
+		for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied"} {
+			if strings.Contains(content, marker) {
 				return true
 			}
 		}
