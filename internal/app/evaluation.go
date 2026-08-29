@@ -270,7 +270,7 @@ func (application *Application) handleScoringProviderDiagnostic(w http.ResponseW
 	}
 	exitIdentity := strings.TrimSpace(input.ExitIdentity)
 	results := make([]scoringProviderDiagnosticResult, 0, 2)
-	for _, name := range []string{"iplark", "ipcheck"} {
+	for _, name := range []string{"iplark", "ipsuper"} {
 		provider, configured := application.scoringProviderByName(name)
 		enabled, enabledErr := application.scoringProviderEnabled(r.Context(), name)
 		if !configured || enabledErr != nil || !enabled {
@@ -1315,7 +1315,7 @@ func (application *Application) scoringProviderEnabled(ctx context.Context, name
 }
 
 func (application *Application) scoringThreshold(ctx context.Context, provider string) int {
-	key := "ipcheck_threshold"
+	key := "ipsuper_threshold"
 	if provider == "iplark" {
 		key = "iplark_threshold"
 	}

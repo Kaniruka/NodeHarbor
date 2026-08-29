@@ -36,7 +36,7 @@ func run() error {
 	listenerFile := flag.String("listener-file", "", "file for the actual loopback management listener URL")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	testIPLarkEndpoint := flag.String("test-iplark-endpoint", "", "explicit deterministic smoke-test IPLark endpoint")
-	testIPCheckEndpoint := flag.String("test-ipcheck-endpoint", "", "explicit deterministic smoke-test IPCheck endpoint")
+	testIPSuperEndpoint := flag.String("test-ipsuper-endpoint", "", "explicit deterministic smoke-test IPSuper endpoint")
 	testIPv4IdentityEndpoint := flag.String("test-ipv4-identity-endpoint", "", "explicit deterministic smoke-test IPv4 Exit Identity endpoint")
 	testIPv6IdentityEndpoint := flag.String("test-ipv6-identity-endpoint", "", "explicit deterministic smoke-test IPv6 Exit Identity endpoint")
 	showVersion := flag.Bool("version", false, "print the NodeHarbor version")
@@ -56,14 +56,14 @@ func run() error {
 	}
 	kernel := app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)
 	dependencies := app.DefaultDependencies(kernel)
-	testEndpointsRequested := *testIPLarkEndpoint != "" || *testIPCheckEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
+	testEndpointsRequested := *testIPLarkEndpoint != "" || *testIPSuperEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
 	if testEndpointsRequested && os.Getenv("NODEHARBOR_PACKAGE_SMOKE") != "1" {
 		return errors.New("deterministic smoke endpoints require NODEHARBOR_PACKAGE_SMOKE=1")
 	}
 	if testEndpointsRequested {
 		dependencies = app.DefaultDependenciesWithTestEndpoints(kernel, app.TestEndpointConfig{
 			IPLarkEndpoint:       *testIPLarkEndpoint,
-			IPCheckEndpoint:      *testIPCheckEndpoint,
+			IPSuperEndpoint:      *testIPSuperEndpoint,
 			IPv4IdentityEndpoint: *testIPv4IdentityEndpoint,
 			IPv6IdentityEndpoint: *testIPv6IdentityEndpoint,
 		})

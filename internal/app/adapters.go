@@ -17,7 +17,7 @@ import (
 
 func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
-	ipcheck := NewIPCheckProvider(nil)
+	ipsuper := NewIPSuperProvider(nil)
 	testChannel := TestChannel(UnavailableTestChannel{})
 	var isolation SurfingIsolationGuard = InactiveSurfingIsolation{}
 	if mihomo, ok := kernel.(MihomoKernel); ok {
@@ -34,7 +34,7 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	return Dependencies{
 		Upstream:         NewHTTPUpstream(30 * time.Second),
 		Scoring:          iplark,
-		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipcheck": ipcheck},
+		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipsuper": ipsuper},
 		Kernel:           kernel,
 		TestChannel:      testChannel,
 		Isolation:        isolation,
@@ -46,7 +46,7 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 // provider and Exit Identity endpoints.
 type TestEndpointConfig struct {
 	IPLarkEndpoint       string
-	IPCheckEndpoint      string
+	IPSuperEndpoint      string
 	IPv4IdentityEndpoint string
 	IPv6IdentityEndpoint string
 }
@@ -62,10 +62,10 @@ func DefaultDependenciesWithTestEndpoints(kernel Kernel, config TestEndpointConf
 			}
 		}
 	}
-	if config.IPCheckEndpoint != "" {
-		if provider, ok := dependencies.ScoringProviders["ipcheck"].(IPCheckProvider); ok {
-			provider.Endpoint = config.IPCheckEndpoint
-			dependencies.ScoringProviders["ipcheck"] = provider
+	if config.IPSuperEndpoint != "" {
+		if provider, ok := dependencies.ScoringProviders["ipsuper"].(IPSuperProvider); ok {
+			provider.Endpoint = config.IPSuperEndpoint
+			dependencies.ScoringProviders["ipsuper"] = provider
 		}
 	}
 	if channel, ok := dependencies.TestChannel.(*MihomoTestChannel); ok {

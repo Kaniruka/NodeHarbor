@@ -178,9 +178,9 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
     const url = String(input);
     if (url.endsWith("/api/settings") && init?.method === "PUT") {
       expect(JSON.parse(String(init.body))).toMatchObject({
-        scoringProvider: "ipcheck",
+        scoringProvider: "ipsuper",
         iplarkThreshold: 61,
-        ipcheckThreshold: 73,
+        ipsuperThreshold: 73,
       });
       return new Response(null, { status: 204 });
     }
@@ -188,12 +188,12 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
       return Response.json({
         language: "zh-CN",
         installationId: "installation-1",
-        scoringProvider: "ipcheck",
+        scoringProvider: "ipsuper",
         iplarkThreshold: 61,
-        ipcheckThreshold: 73,
+        ipsuperThreshold: 73,
         scoringProviders: [
           { name: "iplark", enabled: true },
-          { name: "ipcheck", enabled: true, failureStatus: "IPCheck.ing score could not be parsed" },
+          { name: "ipsuper", enabled: true, failureStatus: "IPSuper aggregate security score was not found" },
         ],
       });
     }
@@ -207,10 +207,10 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
 
   render(<App />);
   expect(await screen.findByLabelText("IPLark 合格阈值")).toHaveValue(61);
-  expect(screen.getByLabelText("IPCheck.ing 合格阈值")).toHaveValue(73);
-  expect(screen.getByText(/IPCheck\.ing score could not be parsed/)).toBeInTheDocument();
-  await userEvent.clear(screen.getByLabelText("IPCheck.ing 合格阈值"));
-  await userEvent.type(screen.getByLabelText("IPCheck.ing 合格阈值"), "73");
+  expect(screen.getByLabelText("IPSuper 合格阈值")).toHaveValue(73);
+  expect(screen.getByText(/IPSuper aggregate security score was not found/)).toBeInTheDocument();
+  await userEvent.clear(screen.getByLabelText("IPSuper 合格阈值"));
+  await userEvent.type(screen.getByLabelText("IPSuper 合格阈值"), "73");
   await userEvent.click(screen.getByRole("button", { name: "保存评分设置" }));
 });
 
@@ -218,7 +218,7 @@ test("evaluation results show independent stage diagnostics and provider availab
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json({
-      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70,
+      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70,
       scoringProviders: [{ name: "iplark", enabled: true, status: "unavailable", failureStatus: "IPLark provider unavailable: HTTP 403" }],
     });
     if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
@@ -271,7 +271,7 @@ test("History shows durable run diagnostics and links to configuration export", 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json({
-      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70,
+      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70,
       evaluationIntervalMinutes: 360, historyRetentionDays: 7, scoreCacheTTLMinutes: 1440, listenPort: 9876,
       availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5, availabilityMaxLatencyMs: 1500,
       availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
@@ -307,7 +307,7 @@ test("listener diagnostics show local and current Published Subscription entrypo
       localSubscriptionURL: "http://127.0.0.1:19876/sub/clash.yaml", subscriptionURL: "http://lan.example:19876/sub/clash.yaml",
       lanSubscriptionURLs: ["http://192.168.1.20:19876/sub/clash.yaml"],
       listenerError: "listen for Published Subscription: address already in use",
-      scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
+      scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
       scoreCacheTTLMinutes: 1440, availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5,
       availabilityMaxLatencyMs: 1500, availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
     });

@@ -240,7 +240,7 @@ type settingsResponse struct {
 	InstallationID                string                  `json:"installationId"`
 	ScoringProvider               string                  `json:"scoringProvider"`
 	IPLarkThreshold               int                     `json:"iplarkThreshold"`
-	IPCheckThreshold              int                     `json:"ipcheckThreshold"`
+	IPSuperThreshold              int                     `json:"ipsuperThreshold"`
 	EvaluationIntervalMinutes     int                     `json:"evaluationIntervalMinutes"`
 	HistoryRetentionDays          int                     `json:"historyRetentionDays"`
 	AvailabilityAttempts          int                     `json:"availabilityAttempts"`
@@ -374,15 +374,15 @@ func (application *Application) initialize(ctx context.Context) error {
 	for key, value := range map[string]string{
 		"scoring_provider":                "iplark",
 		"iplark_threshold":                "70",
-		"ipcheck_threshold":               "70",
+		"ipsuper_threshold":               "70",
 		"iplark_enabled":                  "1",
-		"ipcheck_enabled":                 "1",
+		"ipsuper_enabled":                 "1",
 		"iplark_failure":                  "",
-		"ipcheck_failure":                 "",
+		"ipsuper_failure":                 "",
 		"iplark_status":                   "unverified",
-		"ipcheck_status":                  "unverified",
+		"ipsuper_status":                  "unverified",
 		"iplark_checked_at":               "",
-		"ipcheck_checked_at":              "",
+		"ipsuper_checked_at":              "",
 		"evaluation_interval_minutes":     "360",
 		"history_retention_days":          "7",
 		"availability_attempts":           fmt.Sprint(DefaultAvailabilityAttempts),
@@ -400,6 +400,9 @@ func (application *Application) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize scoring setting: %w", err)
 		}
 	}
+	if err := application.migrateIPCheckSettings(ctx); err != nil {
+		return err
+	}
 	installationID, err := randomID()
 	if err != nil {
 		return fmt.Errorf("generate installation id: %w", err)
@@ -415,6 +418,24 @@ func (application *Application) initialize(ctx context.Context) error {
 	}
 	go application.runScheduler()
 	return application.ensureInitialPublication(ctx)
+}
+
+// migrateIPCheckSettings removes retired IPCheck.ing settings while preserving
+// the only value that has an IPSuper equivalent: its valid pass threshold.
+func (application *Application) migrateIPCheckSettings(ctx context.Context) error {
+	var threshold int
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipcheck_threshold'`).Scan(&threshold); err == nil && threshold >= 0 && threshold <= 100 {
+		if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = 'ipsuper_threshold'`, threshold); err != nil {
+			return fmt.Errorf("migrate IPSuper threshold: %w", err)
+		}
+	}
+	if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = 'iplark' WHERE key = 'scoring_provider' AND value = 'ipcheck'`); err != nil {
+		return fmt.Errorf("migrate selected Scoring Provider: %w", err)
+	}
+	if _, err := application.database.ExecContext(ctx, `DELETE FROM settings WHERE key IN ('ipcheck_threshold', 'ipcheck_enabled', 'ipcheck_failure', 'ipcheck_status', 'ipcheck_checked_at')`); err != nil {
+		return fmt.Errorf("remove retired IPCheck settings: %w", err)
+	}
+	return nil
 }
 
 func (application *Application) ensureInitialPublication(ctx context.Context) error {
@@ -491,9 +512,9 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		Language                      string    `json:"language"`
 		ScoringProvider               string    `json:"scoringProvider"`
 		IPLarkThreshold               *int      `json:"iplarkThreshold"`
-		IPCheckThreshold              *int      `json:"ipcheckThreshold"`
+		IPSuperThreshold              *int      `json:"ipsuperThreshold"`
 		IPLarkEnabled                 *bool     `json:"iplarkEnabled"`
-		IPCheckEnabled                *bool     `json:"ipcheckEnabled"`
+		IPSuperEnabled                *bool     `json:"ipsuperEnabled"`
 		EvaluationIntervalMinutes     *int      `json:"evaluationIntervalMinutes"`
 		HistoryRetentionDays          *int      `json:"historyRetentionDays"`
 		AvailabilityAttempts          *int      `json:"availabilityAttempts"`
@@ -519,8 +540,8 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			return
 		}
 	}
-	if input.ScoringProvider != "" && input.ScoringProvider != "iplark" && input.ScoringProvider != "ipcheck" {
-		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipcheck"))
+	if input.ScoringProvider != "" && input.ScoringProvider != "iplark" && input.ScoringProvider != "ipsuper" {
+		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipsuper"))
 		return
 	}
 	if input.AvailabilityURLs != nil {
@@ -566,7 +587,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_address": input.ListenAddress, "listen_port": input.ListenPort} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipsuper_threshold": input.IPSuperThreshold, "iplark_enabled": input.IPLarkEnabled, "ipsuper_enabled": input.IPSuperEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_address": input.ListenAddress, "listen_port": input.ListenPort} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -676,7 +697,7 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'iplark_threshold'`).Scan(&result.IPLarkThreshold); err != nil {
 		return result, err
 	}
-	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipcheck_threshold'`).Scan(&result.IPCheckThreshold); err != nil {
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipsuper_threshold'`).Scan(&result.IPSuperThreshold); err != nil {
 		return result, err
 	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'evaluation_interval_minutes'`).Scan(&result.EvaluationIntervalMinutes); err != nil {
@@ -732,7 +753,7 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 func (application *Application) readScoringProviderStatuses(ctx context.Context) ([]scoringProviderStatus, error) {
 	providers := []scoringProviderStatus{
 		{Name: "iplark"},
-		{Name: "ipcheck"},
+		{Name: "ipsuper"},
 	}
 	for index := range providers {
 		name := providers[index].Name

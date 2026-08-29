@@ -84,7 +84,7 @@ Timeout, success requirement, latency threshold, and test URLs are configurable.
 
 ## 7. Exit identity and IP scoring
 
-The default scoring provider is IPLark. IPCheck.ing is an alternative provider. Each provider has its own enabled state, threshold, adapter, cache, and failure status. Scores from different providers are never combined or treated as equivalent.
+The default scoring provider is IPLark. IPSuper is an alternative provider. Each provider has its own enabled state, threshold, adapter, cache, and failure status. Scores from different providers are never combined or treated as equivalent.
 
 Both providers start with a threshold of 70, configurable from 0 through 100. A proxy node qualifies only when it passes the availability check and its selected provider score meets that provider's threshold.
 
@@ -96,7 +96,7 @@ If a new exit identity cannot be scored, its nodes are excluded. If a previous s
 
 ### 7.1 Website-adapter constraint
 
-IPLark was observed to request `/ipscore`; arbitrary-IP pages request `/ipscore?ip=<address>&token=<page token>`. Direct non-browser requests can receive HTTP 403. Neither IPLark nor IPCheck.ing is treated as a documented, stable bulk-scoring API.
+IPLark was observed to request `/ipscore`; arbitrary-IP pages request `/ipscore?ip=<address>&token=<page token>`. Direct non-browser requests can receive HTTP 403. IPSuper is queried through its public page in a bounded Test Channel session; neither source is treated as a documented, stable bulk-scoring API.
 
 NodeHarbor therefore uses replaceable, best-effort provider adapters. It does not bundle a headless browser. Adapter failures, anti-bot challenges, token changes, rate limits, and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
 
