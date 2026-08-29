@@ -1,0 +1,8 @@
+{
+  "platform": "android-arm64-v8",
+  "version": "v1.19.30",
+  "asset": "mihomo-android-arm64-v8-v1.19.30.gz",
+  "archiveSHA256": "19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD",
+  "executableSHA256": "94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD",
+  "license": "GPL-3.0-or-later"
+}

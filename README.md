@@ -30,6 +30,17 @@ To use a different address or state directory:
 
 The listener address and port can also be saved in the WebUI. They are persisted in SQLite and take effect after the next restart. The WebUI shows the local subscription URL, the current access URL, and listener diagnostics. A bind conflict is reported at startup and does not replace the last Publication Snapshot.
 
+## Build and verify the KernelSU module
+
+Provide the pinned Android arm64-v8 Mihomo executable to the packaging script. The script verifies its ELF architecture, SHA-256 digest, version metadata, and license notices before building the self-contained module:
+
+```powershell
+.\scripts\package-kernelsu.ps1 -MihomoPath C:\path\to\mihomo-android-arm64-v8-v1.19.30 -Version 0.2.0
+.\scripts\smoke-kernelsu.ps1 -PackageDirectory .\dist\NodeHarbor-kernelsu-0.2.0
+```
+
+On an Android device, run the packaged `action.sh smoke` to verify service startup, the WebUI, the Published Subscription endpoint, SQLite persistence, and owned restart behavior. The module keeps its daemon state and temporary files under its own module directory and never manages system routing or another Mihomo process.
+
 ## Verify
 
 ```powershell

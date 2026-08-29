@@ -168,7 +168,6 @@ var KernelSUMihomoBuild = MihomoBuild{
 }
 
 const MihomoVersion = "v1.19.30"
-const MihomoExecutableSHA256 = "F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761"
 
 func MihomoBuildForPlatform(platform string) (MihomoBuild, error) {
 	switch platform {

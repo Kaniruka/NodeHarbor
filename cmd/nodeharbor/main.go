@@ -21,6 +21,8 @@ import (
 	webassets "github.com/Kaniruka/NodeHarbor/internal/web"
 )
 
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		log.Printf("NodeHarbor stopped: %v", err)
@@ -36,7 +38,12 @@ func run() error {
 	testIPCheckEndpoint := flag.String("test-ipcheck-endpoint", "", "explicit deterministic smoke-test IPCheck endpoint")
 	testIPv4IdentityEndpoint := flag.String("test-ipv4-identity-endpoint", "", "explicit deterministic smoke-test IPv4 Exit Identity endpoint")
 	testIPv6IdentityEndpoint := flag.String("test-ipv6-identity-endpoint", "", "explicit deterministic smoke-test IPv6 Exit Identity endpoint")
+	showVersion := flag.Bool("version", false, "print the NodeHarbor version")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 
 	assets, err := webassets.Assets()
 	if err != nil {
