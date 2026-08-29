@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -76,3 +77,9 @@ type providerUnavailableError struct{ message string }
 func (err providerUnavailableError) Error() string { return err.message }
 func (err providerUnavailableError) Unwrap() error { return errScoringProviderUnavailable }
 func providerUnavailable(message string) error     { return providerUnavailableError{message: message} }
+func providerUnavailableWithCause(message string, cause error) error {
+	if cause == nil {
+		return providerUnavailable(message)
+	}
+	return fmt.Errorf("%w: %w", providerUnavailable(message), cause)
+}

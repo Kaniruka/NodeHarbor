@@ -21,13 +21,14 @@ type IPLarkProvider struct {
 	Client    *http.Client
 	Endpoint  string
 	UserAgent string
+	Timeout   time.Duration
 }
 
 func NewIPLarkProvider(client *http.Client) IPLarkProvider {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return IPLarkProvider{Client: client, Endpoint: "https://iplark.com/ipscore", UserAgent: "NodeHarbor/1.0"}
+	return IPLarkProvider{Client: client, Endpoint: "https://iplark.com/ipscore", UserAgent: "NodeHarbor/1.0", Timeout: 10 * time.Second}
 }
 
 func (provider IPLarkProvider) Name() string { return "iplark" }
@@ -44,6 +45,12 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	if client == nil || provider.Endpoint == "" {
 		return 0, providerUnavailable("IPLark provider is not configured")
 	}
+	timeout := provider.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	requestContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	parsed, err := url.Parse(provider.Endpoint)
 	if err != nil {
 		return 0, providerUnavailable("IPLark provider endpoint is invalid")
@@ -51,7 +58,7 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	query := parsed.Query()
 	query.Set("ip", exitIdentity)
 	parsed.RawQuery = query.Encode()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return 0, providerUnavailable(fmt.Sprintf("create IPLark request: %v", err))
 	}
@@ -61,12 +68,12 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, providerUnavailable(fmt.Sprintf("IPLark request failed: %v", err))
+		return 0, providerUnavailableWithCause("IPLark request failed", err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {
-		return 0, providerUnavailable("IPLark response could not be read")
+		return 0, providerUnavailableWithCause("IPLark response could not be read", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return 0, providerUnavailable(fmt.Sprintf("IPLark provider unavailable: HTTP %d", response.StatusCode))
@@ -81,35 +88,49 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 }
 
 func parseIPLarkJSON(body []byte) (float64, bool) {
-	var value any
-	if json.Unmarshal(body, &value) != nil {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
 		return 0, false
 	}
-	return findScore(value)
+	if status, ok := stringField(envelope, "status"); ok && strings.ToLower(status) != "success" {
+		return 0, false
+	}
+	if score, ok := directScore(envelope); ok {
+		return score, true
+	}
+	var data map[string]json.RawMessage
+	if raw, ok := envelope["data"]; ok && json.Unmarshal(raw, &data) == nil {
+		return directScore(data)
+	}
+	return 0, false
 }
 
-func findScore(value any) (float64, bool) {
-	switch item := value.(type) {
-	case map[string]any:
-		for key, child := range item {
-			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
-			if normalized == "score" || normalized == "ipscore" {
-				if score, ok := number(child); ok && score >= 0 && score <= 100 {
-					return score, true
-				}
-			}
-			if score, ok := findScore(child); ok {
-				return score, true
-			}
+func directScore(fields map[string]json.RawMessage) (float64, bool) {
+	for key, raw := range fields {
+		normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+		if normalized != "score" && normalized != "ipscore" {
+			continue
 		}
-	case []any:
-		for _, child := range item {
-			if score, ok := findScore(child); ok {
+		var value any
+		if json.Unmarshal(raw, &value) == nil {
+			if score, ok := number(value); ok && score >= 0 && score <= 100 {
 				return score, true
 			}
 		}
 	}
 	return 0, false
+}
+
+func stringField(fields map[string]json.RawMessage, key string) (string, bool) {
+	value, ok := fields[key]
+	if !ok {
+		return "", false
+	}
+	var result string
+	if json.Unmarshal(value, &result) != nil {
+		return "", false
+	}
+	return result, true
 }
 
 func number(value any) (float64, bool) {
@@ -126,7 +147,7 @@ func number(value any) (float64, bool) {
 	return 0, false
 }
 
-var iplarkHTMLScore = regexp.MustCompile(`(?i)(?:ip\s*score|score)[^0-9]{0,80}([0-9]{1,3}(?:\.[0-9]+)?)`)
+var iplarkHTMLScore = regexp.MustCompile(`(?i)ip\s*score[^0-9]{0,80}([0-9]{1,3}(?:\.[0-9]+)?)`)
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
 	match := iplarkHTMLScore.FindSubmatch(body)

@@ -45,3 +45,10 @@ func TestPinnedMihomoBuildsHaveTargetSpecificMetadata(t *testing.T) {
 		t.Fatalf("pinned metadata is incomplete: windows=%+v kernelsu=%+v", app.WindowsMihomoBuild, app.KernelSUMihomoBuild)
 	}
 }
+
+func TestDefaultDependenciesUseOwnedMihomoTestChannel(t *testing.T) {
+	dependencies := app.DefaultDependencies(app.NewMihomoKernelWithBuild("nodeharbor-core", app.WindowsMihomoBuild))
+	if _, ok := dependencies.TestChannel.(*app.MihomoTestChannel); !ok {
+		t.Fatalf("default Test Channel=%T, want *app.MihomoTestChannel", dependencies.TestChannel)
+	}
+}

@@ -242,7 +242,11 @@ func (application *Application) Close() error {
 	if application.stopScheduler != nil {
 		application.stopScheduler()
 	}
-	return application.database.Close()
+	closeErr := application.database.Close()
+	if channel, ok := application.dependencies.TestChannel.(interface{ Close() error }); ok {
+		closeErr = errors.Join(closeErr, channel.Close())
+	}
+	return closeErr
 }
 
 func (application *Application) initialize(ctx context.Context) error {
