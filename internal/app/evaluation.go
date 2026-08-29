@@ -520,6 +520,8 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 				result.State = "failed"
 				if result.Reason == "" {
 					result.Reason = "test_channel_cleanup_failed: " + err.Error()
+				} else {
+					result.Reason += "; test_channel_cleanup_failed: " + err.Error()
 				}
 			}
 		}()
@@ -723,7 +725,7 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool, runStartedAt time.Time) (float64, string, string, error) {
 	providerValue, err := application.configuredScoringProvider(ctx)
 	if err != nil {
-		return 0, addressFamily(exitIdentity), "", fmt.Errorf("%w: %v", errScoringProviderUnavailable, err)
+		return 0, addressFamily(exitIdentity), "", fmt.Errorf("%w: %w", errScoringProviderUnavailable, err)
 	}
 	provider, ok := providerValue.(ChannelScoringProvider)
 	if !ok {

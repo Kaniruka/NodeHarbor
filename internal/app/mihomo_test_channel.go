@@ -170,39 +170,39 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 	if err != nil {
 		return nil, fmt.Errorf("create Test Channel directory: %w", err)
 	}
-	cleanup := func() { _ = os.RemoveAll(directory) }
+	cleanup := func(cause error) error {
+		if cleanupErr := os.RemoveAll(directory); cleanupErr != nil {
+			return errors.Join(cause, cleanupErr)
+		}
+		return cause
+	}
 	proxyPort, err := freeLoopbackPort()
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, cleanup(err)
 	}
 	proxyAddress := fmt.Sprintf("127.0.0.1:%d", proxyPort)
 	configPath := filepath.Join(directory, "config.yaml")
 	config, err := mihomoTestChannelConfig(node, proxyPort)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, cleanup(err)
 	}
 	if err := os.WriteFile(configPath, config, 0o600); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("write Test Channel configuration: %w", err)
+		return nil, cleanup(fmt.Errorf("write Test Channel configuration: %w", err))
 	}
 	logFile, err := os.OpenFile(filepath.Join(directory, "mihomo.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("create Test Channel log: %w", err)
+		return nil, cleanup(fmt.Errorf("create Test Channel log: %w", err))
 	}
 	command := exec.Command(channel.executablePath, "-d", directory, "-f", configPath)
 	command.Stdout = logFile
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
-		_ = logFile.Close()
-		cleanup()
-		return nil, fmt.Errorf("start isolated Mihomo Test Channel: %w", err)
+		closeErr := logFile.Close()
+		return nil, cleanup(errors.Join(fmt.Errorf("start isolated Mihomo Test Channel: %w", err), closeErr))
 	}
 	lease := &mihomoTestLease{command: command, logFile: logFile, directory: directory}
 	readyContext, cancel := context.WithTimeout(ctx, mihomoTestChannelTimeout)
-	err = waitForLoopbackListener(readyContext, proxyAddress)
+	err = waitForLoopbackListener(readyContext, proxyAddress, command)
 	cancel()
 	if err != nil {
 		cleanupErr := stopMihomoLease(lease)
@@ -241,9 +241,12 @@ func mihomoTestChannelConfig(node ProxyNode, proxyPort int) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
-func waitForLoopbackListener(ctx context.Context, address string) error {
+func waitForLoopbackListener(ctx context.Context, address string, command *exec.Cmd) error {
 	dialer := &net.Dialer{Timeout: 250 * time.Millisecond}
 	for {
+		if command.ProcessState != nil && command.ProcessState.Exited() {
+			return errors.New("Mihomo Test Channel process exited before readiness")
+		}
 		connection, err := dialer.DialContext(ctx, "tcp", address)
 		if err == nil {
 			_ = connection.Close()

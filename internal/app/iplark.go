@@ -102,16 +102,19 @@ func parseIPLarkJSON(body []byte) (float64, bool) {
 			return 0, false
 		}
 	}
-	if score, ok := directScore(envelope); ok {
-		return score, true
-	}
 	var data map[string]json.RawMessage
-	if raw, ok := envelope["data"]; ok && json.Unmarshal(raw, &data) == nil {
+	if raw, ok := envelope["data"]; ok {
+		if json.Unmarshal(raw, &data) != nil {
+			return 0, false
+		}
 		var dataValue any
 		if json.Unmarshal(raw, &dataValue) != nil || containsFailureMarker(dataValue) {
 			return 0, false
 		}
 		return directScore(data)
+	}
+	if score, ok := directScore(envelope); ok {
+		return score, true
 	}
 	return 0, false
 }
