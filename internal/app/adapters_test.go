@@ -52,3 +52,18 @@ func TestDefaultDependenciesUseOwnedMihomoTestChannel(t *testing.T) {
 		t.Fatalf("default Test Channel=%T, want *app.MihomoTestChannel", dependencies.TestChannel)
 	}
 }
+
+func TestDefaultDependenciesUseConfiguredSmokeEndpoints(t *testing.T) {
+	t.Setenv("NODEHARBOR_TEST_IPLARK_ENDPOINT", "http://127.0.0.1:19001/score")
+	t.Setenv("NODEHARBOR_TEST_IPV4_IDENTITY_ENDPOINT", "http://127.0.0.1:19001/identity")
+	t.Setenv("NODEHARBOR_TEST_IPV6_IDENTITY_ENDPOINT", "http://127.0.0.1:19001/identity-v6")
+
+	dependencies := app.DefaultDependencies(app.NewMihomoKernelWithBuild("nodeharbor-core", app.WindowsMihomoBuild))
+	provider, ok := dependencies.ScoringProviders["iplark"].(app.IPLarkProvider)
+	if !ok {
+		t.Fatalf("IPLark provider=%T, want app.IPLarkProvider", dependencies.ScoringProviders["iplark"])
+	}
+	if provider.Endpoint != "http://127.0.0.1:19001/score" {
+		t.Fatalf("IPLark endpoint=%q", provider.Endpoint)
+	}
+}

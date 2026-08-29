@@ -17,7 +17,13 @@ import (
 
 func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
+	if endpoint := os.Getenv("NODEHARBOR_TEST_IPLARK_ENDPOINT"); endpoint != "" {
+		iplark.Endpoint = endpoint
+	}
 	ipcheck := NewIPCheckProvider(nil)
+	if endpoint := os.Getenv("NODEHARBOR_TEST_IPCHECK_ENDPOINT"); endpoint != "" {
+		ipcheck.Endpoint = endpoint
+	}
 	testChannel := TestChannel(UnavailableTestChannel{})
 	var isolation SurfingIsolationGuard
 	if mihomo, ok := kernel.(MihomoKernel); ok {

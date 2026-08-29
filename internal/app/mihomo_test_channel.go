@@ -31,8 +31,10 @@ const (
 // The process, configuration directory, listener and HTTP transport are all
 // created by NodeHarbor; no foreign Mihomo instance is reused.
 type MihomoTestChannel struct {
-	executablePath string
-	build          MihomoBuild
+	executablePath       string
+	build                MihomoBuild
+	ipv4IdentityEndpoint string
+	ipv6IdentityEndpoint string
 
 	mu     sync.Mutex
 	leases map[string]*mihomoTestLease
@@ -48,7 +50,21 @@ type mihomoTestLease struct {
 }
 
 func NewMihomoTestChannel(executablePath string, build MihomoBuild) *MihomoTestChannel {
-	return &MihomoTestChannel{executablePath: executablePath, build: build, leases: make(map[string]*mihomoTestLease)}
+	ipv4Endpoint := os.Getenv("NODEHARBOR_TEST_IPV4_IDENTITY_ENDPOINT")
+	if ipv4Endpoint == "" {
+		ipv4Endpoint = ipv4IdentityEndpoint
+	}
+	ipv6Endpoint := os.Getenv("NODEHARBOR_TEST_IPV6_IDENTITY_ENDPOINT")
+	if ipv6Endpoint == "" {
+		ipv6Endpoint = ipv6IdentityEndpoint
+	}
+	return &MihomoTestChannel{
+		executablePath:       executablePath,
+		build:                build,
+		ipv4IdentityEndpoint: ipv4Endpoint,
+		ipv6IdentityEndpoint: ipv6Endpoint,
+		leases:               make(map[string]*mihomoTestLease),
+	}
 }
 
 func (channel *MihomoTestChannel) Probe(ctx context.Context, node ProxyNode) (ProbeResult, error) {
@@ -93,9 +109,9 @@ func (channel *MihomoTestChannel) ProbeAttempt(ctx context.Context, node ProxyNo
 }
 
 func (channel *MihomoTestChannel) DiscoverExitIdentities(ctx context.Context, node ProxyNode, family string) ([]ExitIdentityCandidate, error) {
-	endpoint := ipv4IdentityEndpoint
+	endpoint := channel.ipv4IdentityEndpoint
 	if family == "ipv6" {
-		endpoint = ipv6IdentityEndpoint
+		endpoint = channel.ipv6IdentityEndpoint
 	} else if family != "ipv4" {
 		return nil, fmt.Errorf("unsupported Exit Identity address family %q", family)
 	}
