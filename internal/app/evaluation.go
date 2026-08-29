@@ -45,7 +45,18 @@ type evaluationNodeResult struct {
 }
 type evaluationRunResponse struct {
 	evaluationRun
-	Results []evaluationNodeResult `json:"results"`
+	Results []evaluationNodeResult  `json:"results"`
+	Sources []evaluationSourceState `json:"sources"`
+}
+type evaluationSourceState struct {
+	ID             string `json:"sourceId"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Enabled        bool   `json:"enabled"`
+	RefreshStatus  string `json:"refreshStatus"`
+	LastError      string `json:"lastError,omitempty"`
+	LastSuccessAt  string `json:"lastSuccessAt,omitempty"`
+	ProxyNodeCount int    `json:"proxyNodeCount"`
 }
 type evaluationNode struct {
 	ID     string
@@ -89,6 +100,7 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, score_source TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_sources (run_id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, enabled INTEGER NOT NULL, refresh_status TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '', last_success_at TEXT NOT NULL DEFAULT '', proxy_node_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, source_id))`,
 		`CREATE TABLE IF NOT EXISTS score_cache (provider TEXT NOT NULL, exit_identity TEXT NOT NULL, score REAL NOT NULL, address_family TEXT NOT NULL, scored_at TEXT NOT NULL, PRIMARY KEY(provider, exit_identity))`,
 	}
 	for _, statement := range statements {
@@ -292,19 +304,44 @@ func (application *Application) readEvaluationRun(ctx context.Context, id string
 }
 
 func (application *Application) runResponse(ctx context.Context, run evaluationRun) evaluationRunResponse {
-	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}}
+	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}, Sources: []evaluationSourceState{}}
 	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	if err == nil {
+		for rows.Next() {
+			var item evaluationNodeResult
+			if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason) == nil {
+				result.Results = append(result.Results, item)
+			}
+		}
+		_ = rows.Close()
+	}
+	sourceRows, err := application.database.QueryContext(ctx, `SELECT source_id, name, kind, enabled, refresh_status, last_error, last_success_at, proxy_node_count FROM evaluation_sources WHERE run_id = ? ORDER BY name, source_id`, run.ID)
 	if err != nil {
 		return result
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var item evaluationNodeResult
-		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason) == nil {
-			result.Results = append(result.Results, item)
+	defer sourceRows.Close()
+	for sourceRows.Next() {
+		var source evaluationSourceState
+		var enabled int
+		if sourceRows.Scan(&source.ID, &source.Name, &source.Kind, &enabled, &source.RefreshStatus, &source.LastError, &source.LastSuccessAt, &source.ProxyNodeCount) == nil {
+			source.Enabled = enabled != 0
+			result.Sources = append(result.Sources, source)
 		}
 	}
 	return result
+}
+
+func (application *Application) recordEvaluationSourceStates(ctx context.Context, runID string) error {
+	subscriptions, err := application.listUpstreamSubscriptions(ctx)
+	if err != nil {
+		return fmt.Errorf("list Upstream Subscriptions for run history: %w", err)
+	}
+	for _, subscription := range subscriptions {
+		if _, err := application.database.ExecContext(ctx, `INSERT INTO evaluation_sources(run_id, source_id, name, kind, enabled, refresh_status, last_error, last_success_at, proxy_node_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, runID, subscription.ID, subscription.Name, subscription.Kind, subscription.Enabled, subscription.RefreshStatus, subscription.LastError, subscription.LastSuccessAt, subscription.ProxyNodeCount); err != nil {
+			return fmt.Errorf("store Upstream Subscription run status: %w", err)
+		}
+	}
+	return nil
 }
 
 func (application *Application) executeEvaluationRun(ctx context.Context, id string, ignoreCache bool) {
@@ -335,6 +372,10 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.runID = ""
 		application.evaluationMu.Unlock()
 	}()
+	if err := ctx.Err(); err != nil {
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, fmt.Errorf("evaluation interrupted: %w", err))
+		return
+	}
 	if application.dependencies.Isolation != nil {
 		status, err := application.dependencies.Isolation.Check(ctx)
 		if err != nil || !status.Verified || status.Mode == "tun" || status.Mode == "unknown" {
@@ -351,6 +392,13 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	}
 	refreshed, err := application.refreshUpstreamSubscriptions(ctx)
 	if err != nil {
+		if sourceErr := application.recordEvaluationSourceStates(ctx, id); sourceErr != nil {
+			err = errors.Join(err, sourceErr)
+		}
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
+		return
+	}
+	if err := application.recordEvaluationSourceStates(ctx, id); err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
 		return
 	}
@@ -370,6 +418,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		return
 	}
 	passed, failed := 0, 0
+	evaluated := make([]evaluationNodeResult, 0, len(nodes))
 	jobs := make(chan evaluationNode)
 	results := make(chan evaluationNodeResult, len(nodes))
 	var workers sync.WaitGroup
@@ -393,6 +442,11 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		close(results)
 	}()
 	for item := range results {
+		if err := ctx.Err(); err != nil {
+			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
+			return
+		}
+		evaluated = append(evaluated, item)
 		config, configErr := yaml.Marshal(item.Config)
 		if configErr != nil {
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, configErr)
@@ -412,6 +466,18 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			return
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
+		return
+	}
+	if reason := application.evaluationFailureReason(ctx, evaluated); reason != nil {
+		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, reason)
+		return
+	}
+	if len(nodes) > 0 && passed == 0 {
+		application.completeEvaluationRunWithReason(ctx, id, len(nodes), passed, failed, "no Qualified Nodes; previous Publication Snapshot retained")
+		return
+	}
 	if passed > 0 {
 		if err := application.publishQualifiedNodes(ctx, id); err != nil {
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
@@ -421,26 +487,65 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
 }
 
+func (application *Application) evaluationFailureReason(ctx context.Context, results []evaluationNodeResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+	allScoringUnavailable := true
+	hasProviderFailure := false
+	reasons := make([]string, 0, len(results))
+	for _, result := range results {
+		if strings.HasPrefix(result.Reason, "provider_unavailable:") || strings.HasPrefix(result.Reason, "score_unavailable:") {
+			reasons = append(reasons, result.Reason)
+			continue
+		}
+		allScoringUnavailable = false
+	}
+	if !allScoringUnavailable {
+		return nil
+	}
+	provider, err := application.configuredScoringProvider(ctx)
+	if err == nil {
+		var failure string
+		if queryErr := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, scoringProviderKey(provider)+"_failure").Scan(&failure); queryErr == nil {
+			hasProviderFailure = failure != ""
+		}
+	}
+	if !hasProviderFailure {
+		return nil
+	}
+	return fmt.Errorf("all scoring attempts failed; previous Publication Snapshot retained: %s", strings.Join(reasons, "; "))
+}
+
 func (application *Application) refreshUpstreamSubscriptions(ctx context.Context) (bool, error) {
 	subscriptions, err := application.listUpstreamSubscriptions(ctx)
 	if err != nil {
 		return false, fmt.Errorf("list Upstream Subscriptions for refresh: %w", err)
 	}
 	enabled, successful := 0, 0
+	failures := make([]string, 0)
 	for _, subscription := range subscriptions {
 		if !subscription.Enabled {
 			continue
 		}
 		enabled++
+		if subscription.Kind != upstreamKindURL {
+			successful++
+			continue
+		}
 		if _, _, err := application.synchronizeUpstreamSubscription(ctx, subscription); err != nil {
 			// synchronizeUpstreamSubscription records the stale state and last
 			// successful document. A single source failure must not discard
 			// other candidates or the previous publication snapshot.
+			failures = append(failures, fmt.Sprintf("%s: %v", subscription.Name, err))
 			continue
 		}
 		successful++
 	}
-	return enabled == 0 || successful > 0, nil
+	if enabled > 0 && successful == 0 {
+		return false, fmt.Errorf("all Upstream Subscriptions failed to refresh: %s", strings.Join(failures, "; "))
+	}
+	return true, nil
 }
 
 func (application *Application) launchEvaluationRunLocked(id string, ignoreCache bool) {
@@ -557,6 +662,19 @@ func (application *Application) finishEvaluationRun(ctx context.Context, id stri
 	if runErr != nil {
 		status = "failed"
 		reason = runErr.Error()
+	}
+	application.writeEvaluationRunResult(ctx, id, total, passed, failed, status, reason)
+}
+
+func (application *Application) completeEvaluationRunWithReason(ctx context.Context, id string, total, passed, failed int, reason string) {
+	application.writeEvaluationRunResult(ctx, id, total, passed, failed, "completed", reason)
+}
+
+func (application *Application) writeEvaluationRunResult(ctx context.Context, id string, total, passed, failed int, status, reason string) {
+	if ctx.Err() != nil {
+		status = "failed"
+		reason = fmt.Sprintf("evaluation interrupted: %v", ctx.Err())
+		ctx = context.Background()
 	}
 	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, reason = ?, finished_at = ? WHERE id = ?`, status, total, passed, failed, reason, time.Now().UTC().Format(time.RFC3339Nano), id)
 }

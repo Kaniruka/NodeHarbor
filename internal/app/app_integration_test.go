@@ -1218,12 +1218,20 @@ func TestUpstreamWideRefreshFailurePreservesTheLastPublishedSnapshot(t *testing.
 	upstream.err = errors.New("upstream outage")
 	runEvaluation(t, server.URL, map[string]any{})
 	var run struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
+		Status  string `json:"status"`
+		Reason  string `json:"reason"`
+		Sources []struct {
+			Name          string `json:"name"`
+			RefreshStatus string `json:"refreshStatus"`
+			LastError     string `json:"lastError"`
+		} `json:"sources"`
 	}
 	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
 	if run.Status != "failed" || !strings.Contains(run.Reason, "all Upstream Subscriptions failed to refresh") {
 		t.Fatalf("run=%+v", run)
+	}
+	if len(run.Sources) != 1 || run.Sources[0].Name != "Retained" || run.Sources[0].RefreshStatus != "stale" || !strings.Contains(run.Sources[0].LastError, "upstream outage") {
+		t.Fatalf("upstream source history=%+v", run.Sources)
 	}
 	afterResponse, err := http.Get(server.URL + "/sub/clash.yaml")
 	if err != nil {
@@ -1236,6 +1244,189 @@ func TestUpstreamWideRefreshFailurePreservesTheLastPublishedSnapshot(t *testing.
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatalf("upstream-wide failure replaced the previous snapshot")
+	}
+}
+
+func TestEvaluationHistoryRecordsEachSourceRefreshOutcome(t *testing.T) {
+	upstream := &configuredUpstream{document: []byte("proxies:\n  - name: remote\n    type: ss\n    server: remote.example\n    port: 443\n")}
+	server := openEvaluationApplication(t, upstream, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Remote", "kind": "url", "url": "https://example.test/remote"})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("remote source status=%d", response.StatusCode)
+	}
+	response = postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Local", "kind": "paste",
+		"document": "proxies:\n  - name: local\n    type: ss\n    server: local.example\n    port: 443\n",
+	})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("local source status=%d", response.StatusCode)
+	}
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+
+	upstream.err = errors.New("remote source unavailable")
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Sources []struct {
+			Name          string `json:"name"`
+			Kind          string `json:"kind"`
+			RefreshStatus string `json:"refreshStatus"`
+			LastError     string `json:"lastError"`
+		} `json:"sources"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Sources) != 2 {
+		t.Fatalf("run sources=%+v", run.Sources)
+	}
+	byName := make(map[string]struct {
+		Kind, RefreshStatus, LastError string
+	})
+	for _, source := range run.Sources {
+		byName[source.Name] = struct {
+			Kind, RefreshStatus, LastError string
+		}{source.Kind, source.RefreshStatus, source.LastError}
+	}
+	remote := byName["Remote"]
+	if remote.Kind != "url" || remote.RefreshStatus != "stale" || !strings.Contains(remote.LastError, "remote source unavailable") {
+		t.Fatalf("remote source outcome=%+v", remote)
+	}
+	local := byName["Local"]
+	if local.Kind != "paste" || local.RefreshStatus != "success" || local.LastError != "" {
+		t.Fatalf("local source outcome=%+v", local)
+	}
+}
+
+func TestAllScoringFailurePreservesSnapshotAndReportsRunReason(t *testing.T) {
+	scoring := &namedScoring{name: "iplark", score: 80}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: retained\n    type: ss\n    server: retained.example\n    port: 443\n")}, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}, scoring)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Retained", "kind": "url", "url": "https://example.test/retained"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	beforeResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := io.ReadAll(beforeResponse.Body)
+	_ = beforeResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scoring.err = errors.New("provider outage")
+	runEvaluation(t, server.URL, map[string]any{"ignoreCache": true})
+
+	var run struct {
+		Status  string `json:"status"`
+		Reason  string `json:"reason"`
+		Results []struct {
+			Reason string `json:"reason"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "failed" || !strings.Contains(run.Reason, "all scoring") || !strings.Contains(run.Reason, "provider outage") {
+		t.Fatalf("run=%+v results=%+v", run, run.Results)
+	}
+	afterResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := io.ReadAll(afterResponse.Body)
+	_ = afterResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("all-scoring failure replaced the previous snapshot")
+	}
+}
+
+func TestNoQualifiedNodePreservesSnapshotAndReportsRunReason(t *testing.T) {
+	scoring := &namedScoring{name: "iplark", score: 80}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: candidate.example\n    port: 443\n")}, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}, scoring)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Candidate", "kind": "url", "url": "https://example.test/candidate"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	beforeResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := io.ReadAll(beforeResponse.Body)
+	_ = beforeResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scoring.score = 10
+	runEvaluation(t, server.URL, map[string]any{"ignoreCache": true})
+
+	var run struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "completed" || !strings.Contains(run.Reason, "no Qualified Nodes") {
+		t.Fatalf("run=%+v", run)
+	}
+	afterResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := io.ReadAll(afterResponse.Body)
+	_ = afterResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("no Qualified Node replaced the previous snapshot")
+	}
+}
+
+func TestInterruptedEvaluationPersistsFailureReason(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
+	channel := &interruptibleChannel{started: make(chan struct{})}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: databasePath, WebAssets: fs.FS(assets)}, app.Dependencies{
+		Upstream:    &recordingUpstream{document: []byte("proxies:\n  - name: interruptible\n    type: ss\n    server: interruptible.example\n    port: 443\n")},
+		Scoring:     &recordingScoring{score: 80},
+		Kernel:      &nodeValidationKernel{},
+		TestChannel: channel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(instance.Handler())
+	defer server.Close()
+
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Interruptible", "kind": "url", "url": "https://example.test/interruptible"})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("source status=%d", response.StatusCode)
+	}
+	response = postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("run status=%d", response.StatusCode)
+	}
+	<-channel.started
+	if err := instance.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var status, reason string
+	if err := database.QueryRow("SELECT status, reason FROM evaluation_runs ORDER BY started_at DESC LIMIT 1").Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || !strings.Contains(reason, "evaluation interrupted") {
+		t.Fatalf("persisted interrupted run status=%q reason=%q", status, reason)
 	}
 }
 
@@ -1787,6 +1978,29 @@ type recordingUpstream struct {
 func (upstream *recordingUpstream) Fetch(_ context.Context, request app.UpstreamRequest) ([]byte, error) {
 	upstream.request = request
 	return upstream.document, nil
+}
+
+type interruptibleChannel struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (channel *interruptibleChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *interruptibleChannel) ProbeAttempt(ctx context.Context, _ app.ProxyNode, _ string) (app.AvailabilityAttempt, error) {
+	channel.once.Do(func() { close(channel.started) })
+	<-ctx.Done()
+	return app.AvailabilityAttempt{}, ctx.Err()
+}
+
+func (channel *interruptibleChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
+	return boundTestChannelClient(), nil
+}
+
+func (channel *interruptibleChannel) DiscoverExitIdentities(ctx context.Context, _ app.ProxyNode, _ string) ([]app.ExitIdentityCandidate, error) {
+	return nil, ctx.Err()
 }
 
 type recordingTestChannel struct {
