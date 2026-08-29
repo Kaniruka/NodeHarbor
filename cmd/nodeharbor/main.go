@@ -48,7 +48,11 @@ func run() error {
 	}
 	kernel := app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)
 	dependencies := app.DefaultDependencies(kernel)
-	if *testIPLarkEndpoint != "" || *testIPCheckEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != "" {
+	testEndpointsRequested := *testIPLarkEndpoint != "" || *testIPCheckEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
+	if testEndpointsRequested && os.Getenv("NODEHARBOR_PACKAGE_SMOKE") != "1" {
+		return errors.New("deterministic smoke endpoints require NODEHARBOR_PACKAGE_SMOKE=1")
+	}
+	if testEndpointsRequested {
 		dependencies = app.DefaultDependenciesWithTestEndpoints(kernel, app.TestEndpointConfig{
 			IPLarkEndpoint:       *testIPLarkEndpoint,
 			IPCheckEndpoint:      *testIPCheckEndpoint,

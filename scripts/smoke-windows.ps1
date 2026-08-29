@@ -159,6 +159,8 @@ try {
     if (-not $fakeReady) { throw 'Deterministic fake server did not become ready' }
 
     $data = Join-Path $root 'smoke-data'
+    $oldPackageSmoke = [Environment]::GetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', 'Process')
+    [Environment]::SetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', '1', 'Process')
     $testArguments = @(
         '--test-iplark-endpoint', "http://127.0.0.1:$fakePort/score",
         '--test-ipv4-identity-endpoint', "http://127.0.0.1:$fakePort/identity",
@@ -169,8 +171,26 @@ try {
     $baseURL = "http://127.0.0.1:$appPort"
     $health = Wait-For-HTTPStatus -Uri "$baseURL/api/health" -Process $process
     if (($health.Body | ConvertFrom-Json).status -ne 'healthy') { throw 'NodeHarbor did not become healthy' }
+    $databasePath = Join-Path $data 'nodeharbor.db'
+    if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) { throw 'SQLite state file was not created' }
+    $databaseStream = [IO.File]::OpenRead($databasePath)
+    try {
+        $databaseHeader = New-Object byte[] 16
+        if ($databaseStream.Read($databaseHeader, 0, $databaseHeader.Length) -ne $databaseHeader.Length -or [Text.Encoding]::ASCII.GetString($databaseHeader) -ne 'SQLite format 3' + [char]0) {
+            throw 'Persistent state file is not SQLite'
+        }
+    }
+    finally {
+        $databaseStream.Dispose()
+    }
     $webUI = Wait-For-HTTPStatus -Uri "$baseURL/" -Process $process
     if ($webUI.Body -notmatch '<div id="root"></div>') { throw 'Embedded WebUI smoke check failed' }
+    $assetPaths = @([regex]::Matches($webUI.Body, '(?:src|href)="([^"#?]+)"') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -like '/assets/*' } | Select-Object -Unique)
+    if ($assetPaths.Count -eq 0) { throw 'Embedded WebUI does not reference any assets' }
+    foreach ($assetPath in $assetPaths) {
+        $asset = Wait-For-HTTPStatus -Uri "$baseURL$assetPath" -Process $process
+        if ([string]::IsNullOrWhiteSpace($asset.Body)) { throw "Embedded WebUI asset is empty: $assetPath" }
+    }
 
     $settings = @{
         scoringProvider = 'iplark'
@@ -220,7 +240,8 @@ try {
             $lanBaseURL = "http://$lanAddress`:$appPort"
             $lanPublication = Invoke-HTTP "$lanBaseURL/sub/clash.yaml"
             $lanManagement = Invoke-HTTP "$lanBaseURL/api/settings"
-            if ($lanPublication.Status -eq 200 -and $lanManagement.Status -eq 403) {
+            $lanWebUI = Invoke-HTTP "$lanBaseURL/"
+            if ($lanPublication.Status -eq 200 -and $lanManagement.Status -eq 403 -and $lanWebUI.Status -eq 403) {
                 $lanCheckPassed = $true
                 break
             }
@@ -240,6 +261,12 @@ try {
 }
 finally {
     if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+    if ($null -ne $oldPackageSmoke) {
+        [Environment]::SetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', $oldPackageSmoke, 'Process')
+    }
+    else {
+        [Environment]::SetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', $null, 'Process')
+    }
     if ($null -ne $fakeJob) {
         Stop-Job -Job $fakeJob -ErrorAction SilentlyContinue
         Remove-Job -Job $fakeJob -Force -ErrorAction SilentlyContinue
