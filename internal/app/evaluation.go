@@ -349,8 +349,13 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			return
 		}
 	}
-	if err := application.refreshUpstreamSubscriptions(ctx); err != nil {
+	refreshed, err := application.refreshUpstreamSubscriptions(ctx)
+	if err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
+		return
+	}
+	if !refreshed {
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, errors.New("all Upstream Subscriptions failed to refresh"))
 		return
 	}
 	nodes, err := application.evaluationNodes(ctx)
@@ -388,18 +393,24 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		close(results)
 	}()
 	for item := range results {
-		if item.State == "passed" {
-			passed++
-		} else {
-			failed++
-		}
 		config, configErr := yaml.Marshal(item.Config)
 		if configErr != nil {
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, configErr)
 			return
 		}
-		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason, config)
-		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
+		if _, err := application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason, config); err != nil {
+			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("store Evaluation Result: %w", err))
+			return
+		}
+		if item.State == "passed" {
+			passed++
+		} else {
+			failed++
+		}
+		if _, err := application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id); err != nil {
+			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("update Evaluation Run: %w", err))
+			return
+		}
 	}
 	if passed > 0 {
 		if err := application.publishQualifiedNodes(ctx, id); err != nil {
@@ -410,23 +421,26 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
 }
 
-func (application *Application) refreshUpstreamSubscriptions(ctx context.Context) error {
+func (application *Application) refreshUpstreamSubscriptions(ctx context.Context) (bool, error) {
 	subscriptions, err := application.listUpstreamSubscriptions(ctx)
 	if err != nil {
-		return fmt.Errorf("list Upstream Subscriptions for refresh: %w", err)
+		return false, fmt.Errorf("list Upstream Subscriptions for refresh: %w", err)
 	}
+	enabled, successful := 0, 0
 	for _, subscription := range subscriptions {
 		if !subscription.Enabled {
 			continue
 		}
+		enabled++
 		if _, _, err := application.synchronizeUpstreamSubscription(ctx, subscription); err != nil {
 			// synchronizeUpstreamSubscription records the stale state and last
 			// successful document. A single source failure must not discard
 			// other candidates or the previous publication snapshot.
 			continue
 		}
+		successful++
 	}
-	return nil
+	return enabled == 0 || successful > 0, nil
 }
 
 func (application *Application) launchEvaluationRunLocked(id string, ignoreCache bool) {

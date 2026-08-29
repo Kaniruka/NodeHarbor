@@ -356,6 +356,39 @@ func TestProxyNodeNamesRemainStableWhenAnotherSourceIntroducesACollision(t *test
 	}
 }
 
+func TestProxyNodeIdentitySurvivesARefreshThatOnlyRenamesTheNode(t *testing.T) {
+	upstream := &configuredUpstream{document: []byte("proxies:\n  - name: original\n    type: ss\n    server: stable.example\n    port: 443\n")}
+	server := openApplicationServer(t, upstream)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Stable", "kind": "url", "url": "https://stable.example/sub",
+	})
+	var subscription struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&subscription); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	initial := readProxyNodes(t, server.URL, subscription.ID)
+	if len(initial) != 1 {
+		t.Fatalf("initial nodes=%+v", initial)
+	}
+
+	upstream.document = []byte("proxies:\n  - name: renamed\n    type: ss\n    server: stable.example\n    port: 443\n")
+	refreshResponse, err := http.Post(server.URL+"/api/upstream-subscriptions/"+subscription.ID+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refreshResponse.Body.Close()
+	if refreshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d", refreshResponse.StatusCode)
+	}
+	updated := readProxyNodes(t, server.URL, subscription.ID)
+	if len(updated) != 1 || updated[0].ID != initial[0].ID || updated[0].Fingerprint != initial[0].Fingerprint || updated[0].OriginalName != "renamed" {
+		t.Fatalf("Proxy Node identity changed after a display-name-only refresh: initial=%+v updated=%+v", initial, updated)
+	}
+}
+
 type proxyNodeResponse struct {
 	ID           string         `json:"id"`
 	Fingerprint  string         `json:"fingerprint"`
@@ -1124,6 +1157,46 @@ func TestEvaluationRunRefreshesUpstreamBeforePublishing(t *testing.T) {
 	}
 	if len(publication.Proxies) != 1 || publication.Proxies[0]["server"] != "second.example" {
 		t.Fatalf("Evaluation Run did not refresh its Upstream Subscription: %+v", publication.Proxies)
+	}
+}
+
+func TestUpstreamWideRefreshFailurePreservesTheLastPublishedSnapshot(t *testing.T) {
+	upstream := &configuredUpstream{document: []byte("proxies:\n  - name: retained\n    type: ss\n    server: retained.example\n    port: 443\n")}
+	server := openEvaluationApplication(t, upstream, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Retained", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+	beforeResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := io.ReadAll(beforeResponse.Body)
+	_ = beforeResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstream.err = errors.New("upstream outage")
+	runEvaluation(t, server.URL, map[string]any{})
+	var run struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "failed" || !strings.Contains(run.Reason, "all Upstream Subscriptions failed to refresh") {
+		t.Fatalf("run=%+v", run)
+	}
+	afterResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := io.ReadAll(afterResponse.Body)
+	_ = afterResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("upstream-wide failure replaced the previous snapshot")
 	}
 }
 

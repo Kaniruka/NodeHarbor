@@ -148,7 +148,7 @@ func (application *Application) migrateProxyNodeFingerprints(ctx context.Context
 	}
 	occurrences := map[string]int{}
 	for _, node := range legacy {
-		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config, node.originalName)
+		fingerprint, err := normalizedNodeFingerprintFromYAML(node.config)
 		if err != nil {
 			return fmt.Errorf("fingerprint legacy Proxy Node: %w", err)
 		}
@@ -621,7 +621,7 @@ func (application *Application) loadStoredProxyNodes(ctx context.Context, tx *sq
 		}
 		if node.Fingerprint == "" {
 			var err error
-			node.Fingerprint, err = normalizedNodeFingerprintFromYAML(config, node.OriginalName)
+			node.Fingerprint, err = normalizedNodeFingerprintFromYAML(config)
 			if err != nil {
 				return nil, err
 			}
@@ -785,6 +785,7 @@ func cloneProxyNodeConfig(config map[string]any) map[string]any {
 
 func normalizedNodeFingerprint(config map[string]any) (string, error) {
 	canonical := cloneProxyNodeConfig(config)
+	delete(canonical, "name")
 	data, err := yaml.Marshal(canonical)
 	if err != nil {
 		return "", err
@@ -793,13 +794,10 @@ func normalizedNodeFingerprint(config map[string]any) (string, error) {
 	return fmt.Sprintf("%x", digest[:]), nil
 }
 
-func normalizedNodeFingerprintFromYAML(config []byte, originalName string) (string, error) {
+func normalizedNodeFingerprintFromYAML(config []byte) (string, error) {
 	var parsed map[string]any
 	if err := yaml.Unmarshal(config, &parsed); err != nil {
 		return "", err
-	}
-	if originalName != "" {
-		parsed["name"] = originalName
 	}
 	return normalizedNodeFingerprint(parsed)
 }
