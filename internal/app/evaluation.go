@@ -600,11 +600,11 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
-		reason := "score_unavailable: "
 		if errors.Is(err, errScoringProviderUnavailable) {
-			reason = "provider_unavailable: "
+			result.Reason = "provider_unavailable: scoring provider request failed"
+			return result
 		}
-		result.Reason = reason + err.Error()
+		result.Reason = "score_unavailable: " + err.Error()
 		return result
 	}
 	result.IPScore = &score

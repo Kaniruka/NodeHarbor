@@ -107,9 +107,35 @@ func parseIPLarkJSON(body []byte) (float64, bool) {
 	}
 	var data map[string]json.RawMessage
 	if raw, ok := envelope["data"]; ok && json.Unmarshal(raw, &data) == nil {
+		var dataValue any
+		if json.Unmarshal(raw, &dataValue) != nil || containsFailureMarker(dataValue) {
+			return 0, false
+		}
 		return directScore(data)
 	}
 	return 0, false
+}
+
+func containsFailureMarker(value any) bool {
+	switch item := value.(type) {
+	case map[string]any:
+		for key, child := range item {
+			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+			if normalized == "error" || normalized == "captcha" || normalized == "challenge" {
+				return true
+			}
+			if containsFailureMarker(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if containsFailureMarker(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func directScore(fields map[string]json.RawMessage) (float64, bool) {
@@ -154,7 +180,7 @@ func number(value any) (float64, bool) {
 	return 0, false
 }
 
-var iplarkHTMLScore = regexp.MustCompile(`(?is)<(?:div|span|p)[^>]*>\s*ip\s*score\s*<(?:strong|b|span)[^>]*>\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*</(?:strong|b|span)>\s*</(?:div|span|p)>`)
+var iplarkHTMLScore = regexp.MustCompile(`(?is)^\s*<(?:div|span|p)[^>]*>\s*ip\s*score\s*<(?:strong|b|span)[^>]*>\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*</(?:strong|b|span)>\s*</(?:div|span|p)>\s*$`)
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
 	content := strings.ToLower(string(body))

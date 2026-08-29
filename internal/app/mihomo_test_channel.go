@@ -144,12 +144,19 @@ func (channel *MihomoTestChannel) Release(node ProxyNode) error {
 	}
 	channel.mu.Lock()
 	lease := channel.leases[key]
-	delete(channel.leases, key)
 	channel.mu.Unlock()
 	if lease == nil {
 		return nil
 	}
-	return stopMihomoLease(lease)
+	if err := stopMihomoLease(lease); err != nil {
+		return err
+	}
+	channel.mu.Lock()
+	if channel.leases[key] == lease {
+		delete(channel.leases, key)
+	}
+	channel.mu.Unlock()
+	return nil
 }
 
 func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode) (*mihomoTestLease, error) {
@@ -198,8 +205,8 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 	err = waitForLoopbackListener(readyContext, proxyAddress)
 	cancel()
 	if err != nil {
-		_ = stopMihomoLease(lease)
-		return nil, fmt.Errorf("wait for Mihomo Test Channel: %w", err)
+		cleanupErr := stopMihomoLease(lease)
+		return nil, errors.Join(fmt.Errorf("wait for Mihomo Test Channel: %w", err), cleanupErr)
 	}
 	proxy, _ := url.Parse("http://" + proxyAddress)
 	transport := &http.Transport{
@@ -274,8 +281,7 @@ func mihomoNodeKey(node ProxyNode) (string, error) {
 func (channel *MihomoTestChannel) Close() error {
 	channel.mu.Lock()
 	leases := make([]*mihomoTestLease, 0, len(channel.leases))
-	for key, lease := range channel.leases {
-		delete(channel.leases, key)
+	for _, lease := range channel.leases {
 		leases = append(leases, lease)
 	}
 	channel.mu.Unlock()
@@ -283,7 +289,15 @@ func (channel *MihomoTestChannel) Close() error {
 	for _, lease := range leases {
 		if err := stopMihomoLease(lease); err != nil {
 			closeErr = errors.Join(closeErr, err)
+			continue
 		}
+		channel.mu.Lock()
+		for key, current := range channel.leases {
+			if current == lease {
+				delete(channel.leases, key)
+			}
+		}
+		channel.mu.Unlock()
 	}
 	return closeErr
 }
