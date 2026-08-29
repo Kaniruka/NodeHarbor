@@ -547,6 +547,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	jobs := make(chan evaluationNode)
 	results := make(chan evaluationNodeResult, len(nodes))
 	isolationFailures := make(chan string, 1)
+	go application.monitorIsolation(runContext, cancelRun, isolationFailures)
 	var workers sync.WaitGroup
 	for worker := 0; worker < availability.workerCount; worker++ {
 		workers.Add(1)
@@ -662,6 +663,31 @@ func (application *Application) isolationFailure(ctx context.Context) (string, b
 		reason = "Surfing isolation could not be proven"
 	}
 	return reason, true
+}
+
+func (application *Application) monitorIsolation(ctx context.Context, cancel context.CancelFunc, failures chan<- string) {
+	if application.dependencies.Isolation == nil {
+		return
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reason, paused := application.isolationFailure(ctx)
+			if !paused {
+				continue
+			}
+			select {
+			case failures <- reason:
+			default:
+			}
+			cancel()
+			return
+		}
+	}
 }
 
 func (application *Application) evaluationFailureReason(ctx context.Context, results []evaluationNodeResult) error {
@@ -1005,6 +1031,10 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 			result.Reason = "provider_unavailable: scoring provider request failed"
 			return result
 		}
+		if strings.HasPrefix(err.Error(), "isolation_paused:") {
+			result.Reason = err.Error()
+			return result
+		}
 		result.Reason = "score_unavailable: " + err.Error()
 		return result
 	}
@@ -1164,6 +1194,9 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		}
 		if err := waitScoringJitter(ctx, jitter); err != nil {
 			return 0, err
+		}
+		if reason, paused := application.isolationFailure(ctx); paused {
+			return 0, fmt.Errorf("isolation_paused: %s", reason)
 		}
 		score, err := provider.ScoreWithClient(ctx, exitIdentity, client)
 		if err != nil {

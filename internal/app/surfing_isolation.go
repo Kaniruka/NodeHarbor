@@ -184,7 +184,7 @@ func isSurfingProcess(rawCmdline string) bool {
 	}
 	for _, arg := range args[1:] {
 		lower := strings.ToLower(arg)
-		if strings.Contains(lower, "surfing") {
+		if strings.Contains(lower, "surfing") || strings.Contains(lower, "/data/adb/box_bll") || strings.Contains(lower, "/data/adb/modules/surfing") {
 			return true
 		}
 	}

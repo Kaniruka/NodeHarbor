@@ -14,6 +14,15 @@ type runtimeInspectionStub struct {
 	inspection app.SurfingRuntimeInspection
 }
 
+type probeVerifierStub struct {
+	verified bool
+	err      error
+}
+
+func (stub probeVerifierStub) Verify(context.Context) (bool, error) {
+	return stub.verified, stub.err
+}
+
 func (stub runtimeInspectionStub) Inspect(context.Context) (app.SurfingRuntimeInspection, error) {
 	return stub.inspection, nil
 }
@@ -137,5 +146,39 @@ func TestDefaultDependenciesUseRealKernelSUSurfingGuard(t *testing.T) {
 	dependencies := app.DefaultDependencies(app.NewMihomoKernelWithBuild("nodeharbor-core", app.KernelSUMihomoBuild))
 	if _, ok := dependencies.Isolation.(app.KernelSUSurfingIsolation); !ok {
 		t.Fatalf("isolation=%T, want app.KernelSUSurfingIsolation", dependencies.Isolation)
+	}
+}
+
+func TestProcSurfingRuntimeInspectorFailsClosedWhenProbeTargetCannotBeVerified(t *testing.T) {
+	root := t.TempDir()
+	netRoot := filepath.Join(root, "net")
+	if err := os.MkdirAll(filepath.Join(root, "self"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(netRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "self", "status"), []byte("Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "123"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "123", "cmdline"), []byte("mihomo\x00--redir-port=7892\x00--exclude-uid=1000\x00--exclude-gid=1000\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := (app.ProcSurfingRuntimeInspector{ProcRoot: root, NetRoot: netRoot, ProbeTargetVerifier: probeVerifierStub{}}).Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inspection.ProcessIdentityVerified || !inspection.TestChannelBypassVerified || inspection.ProbeTargetBypassVerified {
+		t.Fatalf("inspection=%+v, want independent probe-target verification to fail closed", inspection)
+	}
+	status, err := app.NewKernelSUSurfingIsolation(runtimeInspectionStub{inspection: inspection}).Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Verified || !strings.Contains(strings.ToLower(status.Reason), "probe-target") {
+		t.Fatalf("status=%+v, want unverified probe-target reason", status)
 	}
 }
