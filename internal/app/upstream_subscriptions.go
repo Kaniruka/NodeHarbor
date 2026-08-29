@@ -731,11 +731,7 @@ func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]s
 			}
 			candidate := base
 			if len(group) > 1 && usedNames[candidate] {
-				suffix := node.Fingerprint
-				if fingerprintCounts[node.Fingerprint] > 1 {
-					suffix += "-" + node.SubscriptionID
-				}
-				candidate = base + " (" + suffix + ")"
+				candidate = base + " (" + proxyNodeCollisionSuffix(*node, fingerprintCounts[node.Fingerprint]) + ")"
 			}
 			if usedNames[candidate] {
 				candidate += " [" + node.ID + "]"
@@ -752,6 +748,24 @@ func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]s
 
 func proxyNodeDisplayNameBase(node storedProxyNode) string {
 	return fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
+}
+
+func proxyNodeCollisionSuffix(node storedProxyNode, fingerprintCount int) string {
+	suffix := node.Fingerprint
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	if fingerprintCount > 1 {
+		suffix += "-" + shortStableID(node.SubscriptionID)
+	}
+	return suffix
+}
+
+func shortStableID(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
 }
 
 func stableProxyNodeID(subscriptionID, fingerprint string, occurrence int) string {

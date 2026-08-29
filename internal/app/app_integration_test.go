@@ -335,6 +335,9 @@ func TestProxyNodeNamesRemainStableWhenAnotherSourceIntroducesACollision(t *test
 	if len(secondNodes) != 1 || secondNodes[0].Name == firstName || !strings.HasPrefix(secondNodes[0].Name, "[Shared] alpha") {
 		t.Fatalf("colliding Proxy Node name=%+v", secondNodes)
 	}
+	if len(secondNodes[0].Name) > len("[Shared] alpha (12345678)") {
+		t.Fatalf("collision suffix is not short: %q", secondNodes[0].Name)
+	}
 	deleteRequest, err := http.NewRequest(http.MethodDelete, server.URL+"/api/upstream-subscriptions/"+first.ID, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1181,10 +1184,14 @@ func TestPublishedSubscriptionEndpointServesOnlyCompleteSnapshotsDuringReplaceme
 	var observedMu sync.Mutex
 	var readerErrors []error
 	var readerWG sync.WaitGroup
+	readerReady := make(chan struct{}, 4)
+	channel.probeStarted = make(chan struct{})
+	channel.releaseProbe = make(chan struct{})
 	for reader := 0; reader < 4; reader++ {
 		readerWG.Add(1)
 		go func() {
 			defer readerWG.Done()
+			readerReady <- struct{}{}
 			for attempt := 0; attempt < 30; attempt++ {
 				response, err := http.Get(server.URL + "/sub/clash.yaml")
 				if err != nil {
@@ -1207,7 +1214,17 @@ func TestPublishedSubscriptionEndpointServesOnlyCompleteSnapshotsDuringReplaceme
 			}
 		}()
 	}
-	runEvaluation(t, server.URL, map[string]any{})
+	for reader := 0; reader < 4; reader++ {
+		<-readerReady
+	}
+	runResponse := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = runResponse.Body.Close()
+	if runResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("start evaluation status=%d", runResponse.StatusCode)
+	}
+	<-channel.probeStarted
+	close(channel.releaseProbe)
+	waitForEvaluationRun(t, server.URL)
 	readerWG.Wait()
 	if len(readerErrors) > 0 {
 		t.Fatalf("publication readers failed: %v", readerErrors[0])
@@ -1441,9 +1458,12 @@ type timeoutBudgetChannel struct {
 }
 
 type concurrencyChannel struct {
-	mu        sync.Mutex
-	active    int
-	maxActive int
+	mu           sync.Mutex
+	active       int
+	maxActive    int
+	probeStarted chan struct{}
+	releaseProbe chan struct{}
+	probeOnce    sync.Once
 }
 
 func (channel *concurrencyChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
@@ -1457,6 +1477,10 @@ func (channel *concurrencyChannel) ProbeAttempt(context.Context, app.ProxyNode, 
 		channel.maxActive = channel.active
 	}
 	channel.mu.Unlock()
+	if channel.probeStarted != nil {
+		channel.probeOnce.Do(func() { close(channel.probeStarted) })
+		<-channel.releaseProbe
+	}
 	time.Sleep(40 * time.Millisecond)
 	channel.mu.Lock()
 	channel.active--
