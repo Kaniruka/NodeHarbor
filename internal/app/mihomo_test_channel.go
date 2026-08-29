@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -74,8 +75,14 @@ func (channel *MihomoTestChannel) ProbeAttempt(ctx context.Context, node ProxyNo
 	if err != nil {
 		return AvailabilityAttempt{}, err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-	_ = response.Body.Close()
+	_, copyErr := io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	closeErr := response.Body.Close()
+	if copyErr != nil {
+		return AvailabilityAttempt{}, fmt.Errorf("read Availability Check response: %w", copyErr)
+	}
+	if closeErr != nil {
+		return AvailabilityAttempt{}, fmt.Errorf("close Availability Check response: %w", closeErr)
+	}
 	return AvailabilityAttempt{
 		Success:  response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices,
 		Verified: true,
@@ -250,7 +257,13 @@ func waitForLoopbackListener(ctx context.Context, address string, command *exec.
 		connection, err := dialer.DialContext(ctx, "tcp", address)
 		if err == nil {
 			_ = connection.Close()
-			return nil
+			owned, ownershipErr := listenerOwnedBy(ctx, address, command.Process.Pid)
+			if ownershipErr != nil {
+				return ownershipErr
+			}
+			if owned {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -258,6 +271,30 @@ func waitForLoopbackListener(ctx context.Context, address string, command *exec.
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
+}
+
+func listenerOwnedBy(ctx context.Context, address string, pid int) (bool, error) {
+	port := address[strings.LastIndex(address, ":")+1:]
+	if runtime.GOOS == "windows" {
+		output, err := exec.CommandContext(ctx, "netstat", "-ano", "-p", "tcp").Output()
+		if err != nil {
+			return false, fmt.Errorf("verify Mihomo Test Channel ownership: %w", err)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 && strings.HasSuffix(fields[1], ":"+port) && strings.EqualFold(fields[3], "LISTENING") && fields[4] == fmt.Sprint(pid) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if output, err := exec.CommandContext(ctx, "ss", "-ltnpH").Output(); err == nil {
+		return strings.Contains(string(output), ":"+port) && strings.Contains(string(output), fmt.Sprintf("pid=%d", pid)), nil
+	}
+	if output, err := exec.CommandContext(ctx, "netstat", "-ltnp").Output(); err == nil {
+		return strings.Contains(string(output), ":"+port) && strings.Contains(string(output), fmt.Sprintf("/%d", pid)), nil
+	}
+	return false, errors.New("verify Mihomo Test Channel ownership: no socket ownership inspector is available")
 }
 
 func freeLoopbackPort() (int, error) {

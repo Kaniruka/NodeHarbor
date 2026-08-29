@@ -88,6 +88,10 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 }
 
 func parseIPLarkJSON(body []byte) (float64, bool) {
+	var value any
+	if json.Unmarshal(body, &value) != nil || containsFailureMarker(value) {
+		return 0, false
+	}
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(body, &envelope) != nil {
 		return 0, false
@@ -95,12 +99,6 @@ func parseIPLarkJSON(body []byte) (float64, bool) {
 	status, ok := stringField(envelope, "status")
 	if !ok || strings.ToLower(status) != "success" {
 		return 0, false
-	}
-	for key := range envelope {
-		normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
-		if normalized == "error" || normalized == "captcha" || normalized == "challenge" {
-			return 0, false
-		}
 	}
 	var data map[string]json.RawMessage
 	if raw, ok := envelope["data"]; ok {
