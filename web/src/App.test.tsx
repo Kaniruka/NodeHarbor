@@ -252,6 +252,8 @@ test("listener diagnostics show local and current Published Subscription entrypo
     if (url.endsWith("/api/settings")) return Response.json({
       language: "en", installationId: "installation-1", listenAddress: "0.0.0.0", listenPort: 19876,
       localSubscriptionURL: "http://127.0.0.1:19876/sub/clash.yaml", subscriptionURL: "http://lan.example:19876/sub/clash.yaml",
+      lanSubscriptionURLs: ["http://192.168.1.20:19876/sub/clash.yaml"],
+      listenerError: "listen for Published Subscription: address already in use",
       scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
       scoreCacheTTLMinutes: 1440, availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5,
       availabilityMaxLatencyMs: 1500, availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
@@ -268,7 +270,9 @@ test("listener diagnostics show local and current Published Subscription entrypo
   expect(await screen.findByText("Local subscription URL")).toBeInTheDocument();
   expect(screen.getByText("http://127.0.0.1:19876/sub/clash.yaml")).toBeInTheDocument();
   expect(screen.getByText("http://lan.example:19876/sub/clash.yaml")).toBeInTheDocument();
+  expect(screen.getByText("http://192.168.1.20:19876/sub/clash.yaml")).toBeInTheDocument();
   expect(screen.getByText(/0\.0\.0\.0:19876/)).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("address already in use");
   await userEvent.click(screen.getByRole("button", { name: "Save scoring settings" }));
 });
 

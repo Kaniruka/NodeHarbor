@@ -73,25 +73,40 @@ func run() error {
 		_ = server.Shutdown(shutdownContext)
 	}()
 
-	listener, err := net.Listen("tcp", *listenAddress)
+	publicListener, err := net.Listen("tcp", *listenAddress)
+	var managementListener net.Listener
+	var listeners []net.Listener
 	if err != nil {
-		return fmt.Errorf("listen for HTTP: %w", err)
-	}
-	listeners := []net.Listener{listener}
-	if requiresLoopbackListener(listener) {
-		localListener, localErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", listenerPort(listener)))
-		if localErr != nil {
-			_ = listener.Close()
-			return fmt.Errorf("listen for loopback management: %w", localErr)
+		application.SetListenerError(fmt.Errorf("listen for Published Subscription at %s: %w", *listenAddress, err))
+		managementListener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return fmt.Errorf("listen for fallback loopback management: %w", err)
 		}
-		listeners = append(listeners, localListener)
+		listeners = []net.Listener{managementListener}
+	} else {
+		application.SetListenerError(nil)
+		managementListener = publicListener
+		listeners = []net.Listener{publicListener}
+		if requiresLoopbackListener(publicListener) {
+			managementListener, err = net.Listen("tcp", net.JoinHostPort("127.0.0.1", listenerPort(publicListener)))
+			if err != nil {
+				application.SetListenerError(fmt.Errorf("listen for loopback management: %w", err))
+				managementListener, err = net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					_ = publicListener.Close()
+					return fmt.Errorf("listen for fallback loopback management: %w", err)
+				}
+			}
+			listeners = append(listeners, managementListener)
+		}
 	}
-	managementURL := "http://" + listener.Addr().String()
-	if len(listeners) > 1 || listenerIsWildcard(listener) {
-		managementURL = "http://127.0.0.1:" + listenerPort(listener)
+	managementURL := listenerURL(managementListener)
+	if publicListener != nil {
+		log.Printf("Published Subscription listener is available at %s", listenerURL(publicListener))
+	} else {
+		log.Printf("Published Subscription listener is unavailable; serving loopback diagnostics only")
 	}
-	log.Printf("NodeHarbor listener is available at %s", "http://"+listener.Addr().String())
-	log.Printf("Management UI is available at %s; Published Subscription is available at %s/sub/clash.yaml", managementURL, "http://"+listener.Addr().String())
+	log.Printf("Management UI is available at %s", managementURL)
 	if *launchBrowser {
 		if err := openBrowser(managementURL); err != nil {
 			log.Printf("could not open the browser: %v", err)
@@ -114,6 +129,10 @@ func run() error {
 		return fmt.Errorf("serve HTTP: %w", serveErr)
 	}
 	return nil
+}
+
+func listenerURL(listener net.Listener) string {
+	return "http://" + listener.Addr().String()
 }
 
 func requiresLoopbackListener(listener net.Listener) bool {

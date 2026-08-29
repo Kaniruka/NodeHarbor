@@ -327,10 +327,11 @@ func TestManagementPageIsServedByTheRealBackend(t *testing.T) {
 func TestNonLoopbackCanReadOnlyHealthAndPublication(t *testing.T) {
 	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
 	for _, path := range []struct {
+		method string
 		path   string
 		status int
-	}{{"/api/health", http.StatusOK}, {"/sub/clash.yaml", http.StatusOK}, {"/api/settings", http.StatusForbidden}, {"/api/settings/export", http.StatusForbidden}, {"/api/logs", http.StatusForbidden}, {"/api/upstream-subscriptions", http.StatusForbidden}, {"/api/evaluation-runs", http.StatusForbidden}, {"/", http.StatusForbidden}} {
-		request := httptest.NewRequest(http.MethodGet, "http://nodeharbor"+path.path, nil)
+	}{{http.MethodGet, "/api/health", http.StatusOK}, {http.MethodGet, "/sub/clash.yaml", http.StatusOK}, {http.MethodGet, "/api/settings", http.StatusForbidden}, {http.MethodPut, "/api/settings", http.StatusForbidden}, {http.MethodGet, "/api/settings/export", http.StatusForbidden}, {http.MethodGet, "/api/logs", http.StatusForbidden}, {http.MethodGet, "/api/upstream-subscriptions", http.StatusForbidden}, {http.MethodPost, "/api/upstream-subscriptions", http.StatusForbidden}, {http.MethodPatch, "/api/upstream-subscriptions/source", http.StatusForbidden}, {http.MethodDelete, "/api/upstream-subscriptions/source", http.StatusForbidden}, {http.MethodPost, "/api/upstream-subscriptions/source/refresh", http.StatusForbidden}, {http.MethodGet, "/api/upstream-subscriptions/source/nodes", http.StatusForbidden}, {http.MethodGet, "/api/evaluation-runs", http.StatusForbidden}, {http.MethodPost, "/api/evaluation-runs", http.StatusForbidden}, {http.MethodGet, "/api/evaluation-runs/current", http.StatusForbidden}, {http.MethodGet, "/api/evaluation-runs/run", http.StatusForbidden}, {http.MethodGet, "/", http.StatusForbidden}} {
+		request := httptest.NewRequest(path.method, "http://nodeharbor"+path.path, nil)
 		request.RemoteAddr = "192.0.2.10:4000"
 		response := httptest.NewRecorder()
 		instance.Handler().ServeHTTP(response, request)

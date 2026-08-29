@@ -13,6 +13,7 @@ import (
 	"net/http"
 	urlpkg "net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +195,8 @@ type Application struct {
 	stopScheduler      context.CancelFunc
 	scheduleWake       chan struct{}
 	clock              Clock
+	listenerMu         sync.RWMutex
+	listenerError      string
 }
 
 type HealthComponent struct {
@@ -228,6 +231,8 @@ type settingsResponse struct {
 	ListenPort                    int                     `json:"listenPort"`
 	LocalSubscriptionURL          string                  `json:"localSubscriptionURL"`
 	SubscriptionURL               string                  `json:"subscriptionURL"`
+	LANSubscriptionURLs           []string                `json:"lanSubscriptionURLs"`
+	ListenerError                 string                  `json:"listenerError,omitempty"`
 	ScoringProviders              []scoringProviderStatus `json:"scoringProviders"`
 }
 
@@ -279,20 +284,28 @@ func (application *Application) ListenPort(ctx context.Context) (int, error) {
 	return settings.ListenPort, nil
 }
 
-func (application *Application) ListenAddress(ctx context.Context) (string, error) {
-	settings, err := application.readSettings(ctx)
-	if err != nil {
-		return "", err
-	}
-	return settings.ListenAddress, nil
-}
-
 func (application *Application) ListenEndpoint(ctx context.Context) (string, error) {
 	settings, err := application.readSettings(ctx)
 	if err != nil {
 		return "", err
 	}
 	return net.JoinHostPort(settings.ListenAddress, strconv.Itoa(settings.ListenPort)), nil
+}
+
+func (application *Application) SetListenerError(err error) {
+	application.listenerMu.Lock()
+	defer application.listenerMu.Unlock()
+	if err == nil {
+		application.listenerError = ""
+		return
+	}
+	application.listenerError = err.Error()
+}
+
+func (application *Application) ListenerError() string {
+	application.listenerMu.RLock()
+	defer application.listenerMu.RUnlock()
+	return application.listenerError
 }
 
 func (application *Application) Close() error {
@@ -431,6 +444,7 @@ func (application *Application) handleGetSettings(response http.ResponseWriter, 
 		return
 	}
 	settings.SubscriptionURL = requestPublishedSubscriptionURL(request, settings)
+	settings.ListenerError = application.ListenerError()
 	writeJSON(response, http.StatusOK, settings)
 }
 
@@ -668,6 +682,7 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 		return result, err
 	}
 	result.LocalSubscriptionURL = publishedSubscriptionURL("127.0.0.1", result.ListenPort)
+	result.LANSubscriptionURLs = lanSubscriptionURLs(result.ListenAddress, result.ListenPort)
 	providerStatuses, err := application.readScoringProviderStatuses(ctx)
 	if err != nil {
 		return result, err
@@ -720,6 +735,38 @@ func requestPublishedSubscriptionURL(request *http.Request, settings settingsRes
 		host = net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(settings.ListenPort))
 	}
 	return "http://" + host + "/sub/clash.yaml"
+}
+
+func lanSubscriptionURLs(listenAddress string, port int) []string {
+	if ip := net.ParseIP(listenAddress); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+		return []string{publishedSubscriptionURL(listenAddress, port)}
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	urls := make([]string, 0)
+	for _, address := range addresses {
+		var ip net.IP
+		switch value := address.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		host := ip.String()
+		if _, exists := seen[host]; exists {
+			continue
+		}
+		seen[host] = struct{}{}
+		urls = append(urls, publishedSubscriptionURL(host, port))
+	}
+	sort.Strings(urls)
+	return urls
 }
 
 func loopbackManagementOnly(next http.Handler) http.Handler {

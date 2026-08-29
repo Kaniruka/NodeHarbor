@@ -17,6 +17,8 @@ type ListenerSettings = {
   listenPort?: number;
   localSubscriptionURL?: string;
   subscriptionURL?: string;
+  lanSubscriptionURLs?: string[];
+  listenerError?: string;
 };
 
 const messages = {
@@ -36,6 +38,8 @@ const messages = {
     subscriptionHint: "即使尚无代理节点，该地址也始终提供有效配置。",
     localSubscription: "本地订阅地址",
     currentSubscription: "当前访问入口",
+    lanSubscriptions: "局域网订阅地址",
+    noLanSubscriptions: "当前监听地址未提供可识别的 LAN 地址。",
     listener: "监听诊断",
     listenerHint: "管理路由仅接受回环请求；Published Subscription 可按监听地址提供给可信局域网。",
     copy: "复制地址",
@@ -108,6 +112,8 @@ const messages = {
     subscriptionHint: "This address always serves a valid configuration, even with no Proxy Nodes.",
     localSubscription: "Local subscription URL",
     currentSubscription: "Current access URL",
+    lanSubscriptions: "LAN subscription URLs",
+    noLanSubscriptions: "No LAN address is currently available for this listener.",
     listener: "Listener diagnostics",
     listenerHint: "Management routes accept loopback requests only; the Published Subscription follows the configured listener address.",
     copy: "Copy URL",
@@ -280,7 +286,10 @@ export default function App() {
             <code>{listener?.localSubscriptionURL || subscriptionURL()}</code>
             <span>{text.currentSubscription}</span>
             <code>{listener?.subscriptionURL || subscriptionURL()}</code>
+            <span>{text.lanSubscriptions}</span>
+            {listener?.lanSubscriptionURLs?.length ? listener.lanSubscriptionURLs.map((url) => <code key={url}>{url}</code>) : <small>{text.noLanSubscriptions}</small>}
             <small>{text.listener}: {listener?.listenAddress && listener.listenPort ? `${listener.listenAddress}:${listener.listenPort}` : "—"}</small>
+            {listener?.listenerError && <small role="alert">{listener.listenerError}</small>}
             <small>{text.listenerHint}</small>
             <small>{text.restartRequired}</small>
           </div>
