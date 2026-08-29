@@ -41,6 +41,7 @@ function Invoke-HTTP {
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(5)
     $request = $null
     $response = $null
     try {
@@ -83,24 +84,34 @@ function Wait-For-HTTPStatus {
 
 $fakePort = Get-FreeTcpPort
 $appPort = Get-FreeTcpPort
+$readyFile = Join-Path $root 'smoke-fake.ready'
 $subscription = @"
 proxies:
   - name: Smoke Proxy
-    type: http
-    server: 127.0.0.1
-    port: $fakePort
+    type: direct
 "@
-$fakeJob = Start-Job -ArgumentList $fakePort, $subscription -ScriptBlock {
-    param($Port, $Subscription)
+$fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $subscription -ScriptBlock {
+    param($Port, $ReadyFile, $Subscription)
     $ErrorActionPreference = 'Stop'
     $listener = [Net.HttpListener]::new()
     $listener.Prefixes.Add("http://127.0.0.1:$Port/")
     $listener.Start()
+    Set-Content -LiteralPath $ReadyFile -Value 'ready' -NoNewline
     try {
+        $pendingContext = $listener.BeginGetContext($null, $null)
         while ($true) {
-            $context = $listener.GetContext()
+            if (-not $pendingContext.AsyncWaitHandle.WaitOne(250)) { continue }
+            try {
+                $context = $listener.EndGetContext($pendingContext)
+            }
+            catch {
+                break
+            }
             try {
                 $path = $context.Request.Url.AbsolutePath
+                if ($context.Request.RawUrl -match '^https?://[^/]+(?<absolutePath>/[^?]*)') {
+                    $path = $Matches['absolutePath']
+                }
                 $body = ''
                 $contentType = 'text/plain; charset=utf-8'
                 $status = 200
@@ -135,6 +146,7 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $subscription -ScriptBlock {
             finally {
                 $context.Response.Close()
             }
+            $pendingContext = $listener.BeginGetContext($null, $null)
         }
     }
     finally {
@@ -144,19 +156,12 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $subscription -ScriptBlock {
 }
 $process = $null
 try {
-    $fakeReady = $false
     for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        if (Test-Path -LiteralPath $readyFile) { break }
         if ($fakeJob.State -eq 'Failed') { throw "Deterministic fake server failed: $($fakeJob.ChildJobs[0].JobStateInfo.Reason)" }
-        try {
-            if ((Invoke-HTTP "http://127.0.0.1:$fakePort/subscription").Status -eq 200) {
-                $fakeReady = $true
-                break
-            }
-        }
-        catch { }
         Start-Sleep -Milliseconds 100
     }
-    if (-not $fakeReady) { throw 'Deterministic fake server did not become ready' }
+    if (-not (Test-Path -LiteralPath $readyFile)) { throw 'Deterministic fake server did not become ready' }
 
     $data = Join-Path $root 'smoke-data'
     $oldPackageSmoke = [Environment]::GetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', 'Process')
@@ -173,7 +178,7 @@ try {
     if (($health.Body | ConvertFrom-Json).status -ne 'healthy') { throw 'NodeHarbor did not become healthy' }
     $databasePath = Join-Path $data 'nodeharbor.db'
     if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) { throw 'SQLite state file was not created' }
-    $databaseStream = [IO.File]::OpenRead($databasePath)
+    $databaseStream = [IO.File]::Open($databasePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
         $databaseHeader = New-Object byte[] 16
         if ($databaseStream.Read($databaseHeader, 0, $databaseHeader.Length) -ne $databaseHeader.Length -or [Text.Encoding]::ASCII.GetString($databaseHeader) -ne 'SQLite format 3' + [char]0) {
@@ -251,12 +256,15 @@ try {
     if (-not $lanCheckPassed) { throw "LAN boundary checks failed for all non-loopback addresses: $($lanAddresses -join ', ')" }
 
     Stop-Process -Id $process.Id -Force
+    [void]$process.WaitForExit(5000)
     $process = $null
-    $process = Start-Process -FilePath $executable -ArgumentList (@('--listen', "0.0.0.0:$appPort", '--data', $data, '--open-browser=false') + $testArguments) -WorkingDirectory $root -PassThru -WindowStyle Hidden
-    [void](Wait-For-HTTPStatus -Uri "$baseURL/api/health" -Process $process)
-    $persistedSources = (Invoke-HTTP "$baseURL/api/upstream-subscriptions").Body | ConvertFrom-Json
+    $restartPort = Get-FreeTcpPort
+    $restartBaseURL = "http://127.0.0.1:$restartPort"
+    $process = Start-Process -FilePath $executable -ArgumentList (@('--listen', "0.0.0.0:$restartPort", '--data', $data, '--open-browser=false') + $testArguments) -WorkingDirectory $root -PassThru -WindowStyle Hidden
+    [void](Wait-For-HTTPStatus -Uri "$restartBaseURL/api/health" -Process $process)
+    $persistedSources = (Invoke-HTTP "$restartBaseURL/api/upstream-subscriptions").Body | ConvertFrom-Json
     if (@($persistedSources).Count -ne 1 -or $persistedSources[0].name -ne 'Smoke Source') { throw 'Upstream Subscription state did not persist across restart' }
-    $persistedPublication = Invoke-HTTP "$baseURL/sub/clash.yaml"
+    $persistedPublication = Invoke-HTTP "$restartBaseURL/sub/clash.yaml"
     if ($persistedPublication.Status -ne 200 -or $persistedPublication.Body -notmatch 'Smoke Proxy') { throw 'Publication Snapshot did not persist across restart' }
 }
 finally {
@@ -271,4 +279,5 @@ finally {
         Stop-Job -Job $fakeJob -ErrorAction SilentlyContinue
         Remove-Job -Job $fakeJob -Force -ErrorAction SilentlyContinue
     }
+    if ([IO.File]::Exists($readyFile)) { [IO.File]::Delete($readyFile) }
 }
