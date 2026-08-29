@@ -277,19 +277,27 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 func (application *Application) Handler() http.Handler { return application.handler }
 
 func (application *Application) ListenPort(ctx context.Context) (int, error) {
-	settings, err := application.readSettings(ctx)
+	_, port, err := application.listenerConfig(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return settings.ListenPort, nil
+	return port, nil
 }
 
 func (application *Application) ListenEndpoint(ctx context.Context) (string, error) {
-	settings, err := application.readSettings(ctx)
+	address, port, err := application.listenerConfig(ctx)
 	if err != nil {
 		return "", err
 	}
-	return net.JoinHostPort(settings.ListenAddress, strconv.Itoa(settings.ListenPort)), nil
+	return net.JoinHostPort(address, strconv.Itoa(port)), nil
+}
+
+func (application *Application) listenerConfig(ctx context.Context) (string, int, error) {
+	settings, err := application.readSettings(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	return settings.ListenAddress, settings.ListenPort, nil
 }
 
 func (application *Application) SetListenerError(err error) {

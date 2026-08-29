@@ -101,6 +101,9 @@ func run() error {
 		}
 	}
 	managementURL := listenerURL(managementListener)
+	if publicListener != nil && listenerIsWildcard(publicListener) {
+		managementURL = "http://127.0.0.1:" + listenerPort(publicListener)
+	}
 	if publicListener != nil {
 		log.Printf("Published Subscription listener is available at %s", listenerURL(publicListener))
 	} else {
