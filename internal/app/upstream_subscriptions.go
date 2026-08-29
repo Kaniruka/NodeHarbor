@@ -380,6 +380,11 @@ func (application *Application) handleDeleteUpstreamSubscription(response http.R
 		writeError(response, http.StatusNotFound, errors.New("Upstream Subscription not found"))
 		return
 	}
+	if err := application.reallocateProxyNodeNames(request.Context(), tx); err != nil {
+		_ = tx.Rollback()
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -646,25 +651,67 @@ func (application *Application) loadStoredProxyNodeNames(ctx context.Context, tx
 	return names, rows.Err()
 }
 
-func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]string) map[string]string {
-	groups := map[string][]*storedProxyNode{}
+func (application *Application) reallocateProxyNodeNames(ctx context.Context, tx *sql.Tx) error {
+	nodes, err := application.loadStoredProxyNodes(ctx, tx, "")
+	if err != nil {
+		return err
+	}
+	preferredNames := make(map[string]string, len(nodes))
+	for _, node := range nodes {
+		preferredNames[node.ID] = node.Name
+	}
+	allocatedNames := allocateProxyNodeNames(nodes, preferredNames)
 	for index := range nodes {
 		node := &nodes[index]
-		base := fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
+		name := allocatedNames[node.ID]
+		if node.Name == name {
+			continue
+		}
+		config := cloneProxyNodeConfig(node.Config)
+		config["name"] = name
+		data, err := yaml.Marshal(config)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE proxy_nodes SET name = ?, config = ? WHERE id = ?`, name, data, node.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]string) map[string]string {
+	orderedNodes := append([]storedProxyNode(nil), nodes...)
+	sort.Slice(orderedNodes, func(left, right int) bool {
+		return orderedNodes[left].ID < orderedNodes[right].ID
+	})
+	groups := map[string][]*storedProxyNode{}
+	for index := range orderedNodes {
+		node := &orderedNodes[index]
+		base := proxyNodeDisplayNameBase(*node)
 		groups[base] = append(groups[base], node)
 	}
 	result := make(map[string]string, len(nodes))
-	used := map[string]bool{}
-	for _, node := range nodes {
-		base := fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
+	usedNames := map[string]bool{}
+	for _, node := range orderedNodes {
+		base := proxyNodeDisplayNameBase(node)
+		if len(groups[base]) == 1 {
+			continue
+		}
 		name := preferredNames[node.ID]
-		if name == "" || !strings.HasPrefix(name, base) || used[name] {
+		if name == "" || !strings.HasPrefix(name, base) || usedNames[name] {
 			continue
 		}
 		result[node.ID] = name
-		used[name] = true
+		usedNames[name] = true
 	}
-	for base, group := range groups {
+	bases := make([]string, 0, len(groups))
+	for base := range groups {
+		bases = append(bases, base)
+	}
+	sort.Strings(bases)
+	for _, base := range bases {
+		group := groups[base]
 		sort.Slice(group, func(left, right int) bool {
 			if group[left].Fingerprint != group[right].Fingerprint {
 				return group[left].Fingerprint < group[right].Fingerprint
@@ -683,24 +730,28 @@ func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]s
 				continue
 			}
 			candidate := base
-			if used[candidate] {
+			if len(group) > 1 && usedNames[candidate] {
 				suffix := node.Fingerprint
 				if fingerprintCounts[node.Fingerprint] > 1 {
 					suffix += "-" + node.SubscriptionID
 				}
 				candidate = base + " (" + suffix + ")"
 			}
-			if used[candidate] {
+			if usedNames[candidate] {
 				candidate += " [" + node.ID + "]"
 			}
-			for used[candidate] {
+			for usedNames[candidate] {
 				candidate += "-duplicate"
 			}
 			result[node.ID] = candidate
-			used[candidate] = true
+			usedNames[candidate] = true
 		}
 	}
 	return result
+}
+
+func proxyNodeDisplayNameBase(node storedProxyNode) string {
+	return fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
 }
 
 func stableProxyNodeID(subscriptionID, fingerprint string, occurrence int) string {

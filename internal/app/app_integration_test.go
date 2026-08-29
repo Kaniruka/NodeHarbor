@@ -335,6 +335,22 @@ func TestProxyNodeNamesRemainStableWhenAnotherSourceIntroducesACollision(t *test
 	if len(secondNodes) != 1 || secondNodes[0].Name == firstName || !strings.HasPrefix(secondNodes[0].Name, "[Shared] alpha") {
 		t.Fatalf("colliding Proxy Node name=%+v", secondNodes)
 	}
+	deleteRequest, err := http.NewRequest(http.MethodDelete, server.URL+"/api/upstream-subscriptions/"+first.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteResponse, err := http.DefaultClient.Do(deleteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = deleteResponse.Body.Close()
+	if deleteResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status=%d", deleteResponse.StatusCode)
+	}
+	remainingNodes := readProxyNodes(t, server.URL, second.ID)
+	if len(remainingNodes) != 1 || remainingNodes[0].Name != "[Shared] alpha" {
+		t.Fatalf("surviving node kept an unnecessary collision suffix: %+v", remainingNodes)
+	}
 }
 
 type proxyNodeResponse struct {
@@ -1085,6 +1101,9 @@ func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
 func TestPublicationValidationFailurePreservesSnapshotAndReportsReason(t *testing.T) {
 	kernel := &rejectingPublicationKernel{}
 	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, kernel, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
 	beforeResponse, err := http.Get(server.URL + "/sub/clash.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -1095,8 +1114,7 @@ func TestPublicationValidationFailurePreservesSnapshotAndReportsReason(t *testin
 		t.Fatal(err)
 	}
 
-	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
-	_ = response.Body.Close()
+	kernel.reject = true
 	runEvaluation(t, server.URL, map[string]any{})
 
 	var run struct {
@@ -1118,6 +1136,90 @@ func TestPublicationValidationFailurePreservesSnapshotAndReportsReason(t *testin
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatalf("failed publication replaced the previous snapshot: before=%q after=%q", before, after)
+	}
+}
+
+func TestPublishedSubscriptionEndpointServesOnlyCompleteSnapshotsDuringReplacement(t *testing.T) {
+	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: first\n    type: ss\n    server: first.example\n    port: 443\n")}
+	channel := &concurrencyChannel{}
+	server := openEvaluationApplication(t, upstream, &nodeValidationKernel{}, channel)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	var subscription struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&subscription); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	readPublication := func() []byte {
+		response, err := http.Get(server.URL + "/sub/clash.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		document, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return document
+	}
+	oldSnapshot := readPublication()
+	upstream.document = []byte("proxies:\n  - name: second\n    type: ss\n    server: second.example\n    port: 443\n")
+	refreshResponse, err := http.Post(server.URL+"/api/upstream-subscriptions/"+subscription.ID+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refreshResponse.Body.Close()
+	if refreshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d", refreshResponse.StatusCode)
+	}
+
+	var observed [][]byte
+	var observedMu sync.Mutex
+	var readerErrors []error
+	var readerWG sync.WaitGroup
+	for reader := 0; reader < 4; reader++ {
+		readerWG.Add(1)
+		go func() {
+			defer readerWG.Done()
+			for attempt := 0; attempt < 30; attempt++ {
+				response, err := http.Get(server.URL + "/sub/clash.yaml")
+				if err != nil {
+					observedMu.Lock()
+					readerErrors = append(readerErrors, err)
+					observedMu.Unlock()
+					continue
+				}
+				document, err := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				if err != nil {
+					observedMu.Lock()
+					readerErrors = append(readerErrors, err)
+					observedMu.Unlock()
+					continue
+				}
+				observedMu.Lock()
+				observed = append(observed, document)
+				observedMu.Unlock()
+			}
+		}()
+	}
+	runEvaluation(t, server.URL, map[string]any{})
+	readerWG.Wait()
+	if len(readerErrors) > 0 {
+		t.Fatalf("publication readers failed: %v", readerErrors[0])
+	}
+	newSnapshot := readPublication()
+	if bytes.Equal(oldSnapshot, newSnapshot) {
+		t.Fatal("second evaluation did not produce a new snapshot")
+	}
+	for index, document := range observed {
+		if !bytes.Equal(document, oldSnapshot) && !bytes.Equal(document, newSnapshot) {
+			t.Fatalf("reader %d observed a partial or unknown snapshot: %q", index, document)
+		}
 	}
 }
 
@@ -1313,10 +1415,12 @@ func (*nodeValidationKernel) ValidateNode(_ context.Context, node app.ProxyNode)
 	return nil
 }
 
-type rejectingPublicationKernel struct{}
+type rejectingPublicationKernel struct {
+	reject bool
+}
 
-func (*rejectingPublicationKernel) Validate(_ context.Context, document []byte) error {
-	if bytes.Contains(document, []byte("[Publish] candidate")) {
+func (kernel *rejectingPublicationKernel) Validate(_ context.Context, document []byte) error {
+	if kernel.reject && bytes.Contains(document, []byte("[Publish] candidate")) {
 		return errors.New("publication validation failed")
 	}
 	return nil
