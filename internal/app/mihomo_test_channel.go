@@ -35,6 +35,7 @@ type MihomoTestChannel struct {
 	build                MihomoBuild
 	ipv4IdentityEndpoint string
 	ipv6IdentityEndpoint string
+	dataDirectory        string
 
 	mu     sync.Mutex
 	leases map[string]*mihomoTestLease
@@ -63,6 +64,15 @@ func NewMihomoTestChannelWithIdentityEndpoints(executablePath string, build Miho
 		ipv6IdentityEndpoint: ipv6Endpoint,
 		leases:               make(map[string]*mihomoTestLease),
 	}
+}
+
+// NewMihomoTestChannelWithDataDirectory keeps per-node process state under a
+// directory owned by the NodeHarbor installation. An empty directory retains
+// the platform temporary-directory behavior used by standalone Windows runs.
+func NewMihomoTestChannelWithDataDirectory(executablePath string, build MihomoBuild, dataDirectory string) *MihomoTestChannel {
+	channel := NewMihomoTestChannel(executablePath, build)
+	channel.dataDirectory = dataDirectory
+	return channel
 }
 
 func (channel *MihomoTestChannel) Probe(ctx context.Context, node ProxyNode) (ProbeResult, error) {
@@ -196,7 +206,12 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 	if err := verifyMihomoExecutable(channel.executablePath, channel.build); err != nil {
 		return nil, err
 	}
-	directory, err := os.MkdirTemp("", "nodeharbor-test-channel-")
+	if channel.dataDirectory != "" {
+		if err := os.MkdirAll(channel.dataDirectory, 0o700); err != nil {
+			return nil, fmt.Errorf("create Test Channel data directory: %w", err)
+		}
+	}
+	directory, err := os.MkdirTemp(channel.dataDirectory, "nodeharbor-test-channel-")
 	if err != nil {
 		return nil, fmt.Errorf("create Test Channel directory: %w", err)
 	}
@@ -210,9 +225,13 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 	if err != nil {
 		return nil, cleanup(err)
 	}
+	controlPort, err := freeLoopbackPort(proxyPort)
+	if err != nil {
+		return nil, cleanup(err)
+	}
 	proxyAddress := fmt.Sprintf("127.0.0.1:%d", proxyPort)
 	configPath := filepath.Join(directory, "config.yaml")
-	config, err := mihomoTestChannelConfig(node, proxyPort)
+	config, err := mihomoTestChannelConfig(node, proxyPort, controlPort)
 	if err != nil {
 		return nil, cleanup(err)
 	}
@@ -249,18 +268,20 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 	return lease, nil
 }
 
-func mihomoTestChannelConfig(node ProxyNode, proxyPort int) ([]byte, error) {
+func mihomoTestChannelConfig(node ProxyNode, proxyPort, controlPort int) ([]byte, error) {
 	proxy := make(map[string]any, len(node.Config)+1)
 	for key, value := range node.Config {
 		proxy[key] = value
 	}
 	proxy["name"] = "NODEHARBOR_TEST_NODE"
 	config := map[string]any{
-		"mixed-port": proxyPort,
-		"allow-lan":  false,
-		"mode":       "rule",
-		"log-level":  "warning",
-		"proxies":    []map[string]any{proxy},
+		"mixed-port":          proxyPort,
+		"bind-address":        "127.0.0.1",
+		"external-controller": fmt.Sprintf("127.0.0.1:%d", controlPort),
+		"allow-lan":           false,
+		"mode":                "rule",
+		"log-level":           "warning",
+		"proxies":             []map[string]any{proxy},
 		"proxy-groups": []map[string]any{{
 			"name":    "NODEHARBOR_TEST_GROUP",
 			"type":    "select",
@@ -342,13 +363,20 @@ func socketTableHasOwner(output, port string, pid int) bool {
 	return false
 }
 
-func freeLoopbackPort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("reserve Test Channel port: %w", err)
+func freeLoopbackPort(excluded ...int) (int, error) {
+	for attempt := 0; attempt < 32; attempt++ {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, fmt.Errorf("reserve Test Channel port: %w", err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		_ = listener.Close()
+		if IsSurfingDefaultPort(port) || containsInt(excluded, port) {
+			continue
+		}
+		return port, nil
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
+	return 0, errors.New("reserve Test Channel port: no safe loopback port available")
 }
 
 func mihomoNodeKey(node ProxyNode) (string, error) {

@@ -142,6 +142,24 @@ type SurfingIsolationGuard interface {
 	Check(context.Context) (SurfingIsolationStatus, error)
 }
 
+// SurfingRuntimeInspection is the read-only platform observation used to
+// decide whether an Evaluation Run can safely use an isolated Test Channel.
+// The inspection deliberately contains proof results rather than commands:
+// NodeHarbor never changes Surfing configuration, processes, or routing.
+type SurfingRuntimeInspection struct {
+	Detected                  bool
+	Mode                      string
+	ProcessIdentityVerified   bool
+	TestChannelBypassVerified bool
+	ProbeTargetBypassVerified bool
+}
+
+// SurfingRuntimeInspector observes platform state without owning or
+// modifying Surfing. It is injectable so the platform contract is testable.
+type SurfingRuntimeInspector interface {
+	Inspect(context.Context) (SurfingRuntimeInspection, error)
+}
+
 type UpstreamRequest struct {
 	Location  string
 	UserAgent string

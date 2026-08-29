@@ -503,20 +503,10 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, fmt.Errorf("evaluation interrupted: %w", err))
 		return
 	}
-	if application.dependencies.Isolation != nil {
-		status, err := application.dependencies.Isolation.Check(ctx)
-		if err != nil || !status.Verified || status.Mode == "tun" || status.Mode == "unknown" {
-			reason := status.Reason
-			if err != nil {
-				reason = err.Error()
-			}
-			if reason == "" {
-				reason = "Surfing isolation could not be proven"
-			}
-			application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
-			application.pauseEvaluationRun(ctx, id, reason)
-			return
-		}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
+		application.pauseEvaluationRun(ctx, id, reason)
+		return
 	}
 	refreshed, err := application.refreshUpstreamSubscriptions(ctx)
 	if err != nil {
@@ -534,6 +524,11 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, errors.New("all Upstream Subscriptions failed to refresh"))
 		return
 	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
+		application.pauseEvaluationRun(ctx, id, reason)
+		return
+	}
 	application.finishEvaluationPhase(ctx, id, "refresh", "completed", "")
 	application.beginEvaluationPhase(ctx, id, "availability-and-scoring")
 	nodes, err := application.evaluationNodes(ctx)
@@ -549,21 +544,37 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	}
 	passed, failed := 0, 0
 	evaluated := make([]evaluationNodeResult, 0, len(nodes))
+	runContext, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	jobs := make(chan evaluationNode)
 	results := make(chan evaluationNodeResult, len(nodes))
+	isolationFailures := make(chan string, 1)
 	var workers sync.WaitGroup
 	for worker := 0; worker < availability.workerCount; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for node := range jobs {
-				results <- application.evaluateNode(ctx, node, availability, ignoreCache, runStartedAt)
+				if reason, paused := application.isolationFailure(runContext); paused {
+					select {
+					case isolationFailures <- reason:
+					default:
+					}
+					cancelRun()
+					return
+				}
+				results <- application.evaluateNode(runContext, node, availability, ignoreCache, runStartedAt)
 			}
 		}()
 	}
 	go func() {
 		for _, node := range nodes {
-			jobs <- node
+			select {
+			case jobs <- node:
+			case <-runContext.Done():
+				close(jobs)
+				return
+			}
 		}
 		close(jobs)
 	}()
@@ -596,6 +607,12 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			return
 		}
 	}
+	select {
+	case reason := <-isolationFailures:
+		application.pauseEvaluationRun(ctx, id, reason)
+		return
+	default:
+	}
 	if err := ctx.Err(); err != nil {
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
 		return
@@ -625,6 +642,24 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.setPublicationResult(ctx, id, "retained")
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) isolationFailure(ctx context.Context) (string, bool) {
+	if application.dependencies.Isolation == nil {
+		return "", false
+	}
+	status, err := application.dependencies.Isolation.Check(ctx)
+	if err != nil {
+		return err.Error(), true
+	}
+	if status.Verified && status.Mode != "tun" && status.Mode != "unknown" {
+		return "", false
+	}
+	reason := status.Reason
+	if reason == "" {
+		reason = "Surfing isolation could not be proven"
+	}
+	return reason, true
 }
 
 func (application *Application) evaluationFailureReason(ctx context.Context, results []evaluationNodeResult) error {

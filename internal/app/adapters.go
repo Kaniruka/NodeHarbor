@@ -21,9 +21,14 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	testChannel := TestChannel(UnavailableTestChannel{})
 	var isolation SurfingIsolationGuard
 	if mihomo, ok := kernel.(MihomoKernel); ok {
-		testChannel = NewMihomoTestChannel(mihomo.executablePath, mihomo.build)
+		if mihomo.build.Platform == KernelSUMihomoBuild.Platform && mihomo.executablePath != "" {
+			moduleDirectory := filepath.Dir(filepath.Dir(mihomo.executablePath))
+			testChannel = NewMihomoTestChannelWithDataDirectory(mihomo.executablePath, mihomo.build, filepath.Join(moduleDirectory, "data", "test-channels"))
+		} else {
+			testChannel = NewMihomoTestChannel(mihomo.executablePath, mihomo.build)
+		}
 		if mihomo.build.Platform == KernelSUMihomoBuild.Platform {
-			isolation = UnavailableSurfingIsolation{}
+			isolation = NewKernelSUSurfingIsolation()
 		}
 	}
 	return Dependencies{
@@ -81,6 +86,60 @@ type UnavailableSurfingIsolation struct{}
 
 func (UnavailableSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
 	return SurfingIsolationStatus{Mode: "unknown", Reason: "Surfing isolation status is unavailable"}, nil
+}
+
+// KernelSUSurfingIsolation converts the platform's read-only observations
+// into the guard contract consumed before every Evaluation Run.
+type KernelSUSurfingIsolation struct {
+	inspector SurfingRuntimeInspector
+}
+
+func NewKernelSUSurfingIsolation(inspectors ...SurfingRuntimeInspector) KernelSUSurfingIsolation {
+	if len(inspectors) > 0 && inspectors[0] != nil {
+		return KernelSUSurfingIsolation{inspector: inspectors[0]}
+	}
+	return KernelSUSurfingIsolation{inspector: ProcSurfingRuntimeInspector{}}
+}
+
+func (guard KernelSUSurfingIsolation) Check(ctx context.Context) (SurfingIsolationStatus, error) {
+	inspection, err := guard.inspector.Inspect(ctx)
+	if err != nil {
+		return SurfingIsolationStatus{Mode: "unknown", Reason: fmt.Sprintf("inspect Surfing isolation: %v", err)}, nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(inspection.Mode))
+	if mode == "" {
+		mode = "unknown"
+	}
+	if !inspection.Detected && mode == "inactive" {
+		return SurfingIsolationStatus{Mode: mode, Verified: true, Reason: "Surfing is not active"}, nil
+	}
+	if mode == "tun" {
+		return SurfingIsolationStatus{Mode: mode, Reason: "Surfing TUN is active"}, nil
+	}
+	if mode != "redirect" && mode != "tproxy" {
+		return SurfingIsolationStatus{Mode: mode, Reason: "Surfing isolation mode is unknown"}, nil
+	}
+	if !inspection.ProcessIdentityVerified {
+		return SurfingIsolationStatus{Mode: mode, Reason: "NodeHarbor process identity is not verified for Surfing bypass"}, nil
+	}
+	if !inspection.TestChannelBypassVerified {
+		return SurfingIsolationStatus{Mode: mode, Reason: "Test Channel bypass is not verified"}, nil
+	}
+	if !inspection.ProbeTargetBypassVerified {
+		return SurfingIsolationStatus{Mode: mode, Reason: "probe-target bypass is not verified"}, nil
+	}
+	return SurfingIsolationStatus{Mode: mode, Verified: true, Reason: "Surfing transparent-proxy bypass verified"}, nil
+}
+
+var SurfingDefaultPorts = []int{7890, 7891, 1536, 1053, 9090}
+
+func IsSurfingDefaultPort(port int) bool {
+	for _, candidate := range SurfingDefaultPorts {
+		if port == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 type UnavailableUpstream struct{}

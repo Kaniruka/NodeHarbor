@@ -1927,6 +1927,35 @@ func TestSurfingTUNPausesEvaluationBeforeProbe(t *testing.T) {
 	}
 }
 
+func TestSurfingIsolationStateChangePausesBeforeNextProxyNode(t *testing.T) {
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}
+	guard := &sequencedSurfingGuard{statuses: []app.SurfingIsolationStatus{
+		{Mode: "inactive", Verified: true},
+		{Mode: "inactive", Verified: true},
+		{Mode: "tun", Reason: "Surfing TUN became active"},
+	}}
+	server := openGuardedEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: first\n    type: ss\n    server: first.example\n    port: 443\n  - name: second\n    type: ss\n    server: second.example\n    port: 443\n")}, &nodeValidationKernel{}, channel, guard)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Guarded", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "paused" || run.Reason != "Surfing TUN became active" || channel.calls != 0 {
+		t.Fatalf("run=%+v calls=%d guardCalls=%d", run, channel.calls, guard.calls)
+	}
+}
+
 func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel app.Kernel) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
@@ -2194,6 +2223,23 @@ type surfingGuard struct{ status app.SurfingIsolationStatus }
 
 func (guard surfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {
 	return guard.status, nil
+}
+
+type sequencedSurfingGuard struct {
+	mu       sync.Mutex
+	statuses []app.SurfingIsolationStatus
+	calls    int
+}
+
+func (guard *sequencedSurfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	index := guard.calls
+	guard.calls++
+	if index >= len(guard.statuses) {
+		index = len(guard.statuses) - 1
+	}
+	return guard.statuses[index], nil
 }
 
 func (channel *availabilityChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
