@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$MihomoPath,
     [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\dist'),
-    [string]$Version = 'dev'
+    [string]$Version = '0.2.0'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -10,6 +10,7 @@ $moduleText = Get-Content -Raw -LiteralPath $modulePath
 $moduleVersionMatch = [regex]::Match($moduleText, '(?m)^version=(.+)$')
 if (-not $moduleVersionMatch.Success) { throw 'KernelSU module version is missing' }
 $moduleVersion = $moduleVersionMatch.Groups[1].Value.Trim()
+if ($Version -ne $moduleVersion) { throw "Package version '$Version' must match KernelSU module version '$moduleVersion'" }
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 $stage = Join-Path $outputRoot "NodeHarbor-kernelsu-$Version"
 $archive = Join-Path $outputRoot "NodeHarbor-kernelsu-$Version.zip"

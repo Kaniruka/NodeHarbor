@@ -32,7 +32,8 @@ function Assert-Arm64Elf([string]$Path, [string]$Subject) {
 }
 
 $prop = Get-Content -Raw -LiteralPath (Join-Path $root 'module.prop')
-if ($prop -notmatch '(?m)^id=nodeharbor$' -or $prop -notmatch '(?m)^version=0\.2\.0$' -or $prop -notmatch '(?m)^versionCode=20$') {
+$moduleVersionMatch = [regex]::Match($prop, '(?m)^version=(.+)$')
+if ($prop -notmatch '(?m)^id=nodeharbor$' -or -not $moduleVersionMatch.Success -or $prop -notmatch '(?m)^versionCode=20$') {
     throw 'KernelSU module metadata is invalid'
 }
 $metadata = Get-Content -Raw -LiteralPath (Join-Path $root 'bin\nodeharbor-core.json') | ConvertFrom-Json
@@ -44,7 +45,7 @@ $nodeharborPath = Join-Path $root 'bin\nodeharbor'
 Assert-Arm64Elf $nodeharborPath 'NodeHarbor'
 Assert-Arm64Elf $corePath 'Mihomo'
 $nodeharborMetadata = Get-Content -Raw -LiteralPath (Join-Path $root 'bin\nodeharbor.json') | ConvertFrom-Json
-if ($nodeharborMetadata.platform -ne 'android-arm64-v8' -or $nodeharborMetadata.version -ne '0.2.0' -or $nodeharborMetadata.license -ne 'MIT') {
+if ($nodeharborMetadata.platform -ne 'android-arm64-v8' -or $nodeharborMetadata.version -ne $moduleVersionMatch.Groups[1].Value.Trim() -or $nodeharborMetadata.license -ne 'MIT') {
     throw "NodeHarbor metadata is invalid: $($nodeharborMetadata | ConvertTo-Json -Compress)"
 }
 $nodeharborDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeharborPath).Hash.ToUpperInvariant()

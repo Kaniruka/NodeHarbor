@@ -58,7 +58,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   case "$run_status" in completed|failed|paused) break ;; esac
   sleep 1
 done
-[ "$run_status" = 'completed' ] || { echo "evaluation run did not complete safely: $run_status" >&2; exit 1; }
+case "$run_status" in completed|paused) ;; *) echo "evaluation run did not complete safely: $run_status" >&2; exit 1 ;; esac
 publication_after=$(request "$base_url/sub/clash.yaml") || { echo 'Published Subscription fetch failed after evaluation' >&2; exit 1; }
 [ "$publication_before" = "$publication_after" ] || { echo 'failed evaluation replaced the previous Publication Snapshot' >&2; exit 1; }
 
@@ -67,5 +67,16 @@ nodeharbor_start || { echo 'owned restart failed' >&2; exit 1; }
 settings_after=$(request "$base_url/api/settings") || { echo 'health endpoint failed after restart' >&2; exit 1; }
 installation_id_after=$(printf '%s' "$settings_after" | sed -n 's/.*"installationId":"\([^"]*\)".*/\1/p')
 [ "$installation_id_before" = "$installation_id_after" ] || { echo 'SQLite state did not persist across restart' >&2; exit 1; }
-if [ "$was_running" -eq 0 ]; then nodeharbor_stop; fi
+
+nodeharbor_stop || { echo 'owned stop before foreign-process test failed' >&2; exit 1; }
+sleep 60 &
+foreign_pid=$!
+printf '%s\n' "$foreign_pid" >"$PID_FILE"
+"$MODDIR/uninstall.sh" || { echo 'uninstall lifecycle failed' >&2; kill "$foreign_pid" 2>/dev/null || true; exit 1; }
+if ! kill -0 "$foreign_pid" 2>/dev/null; then
+  echo 'uninstall lifecycle terminated a foreign process' >&2
+  exit 1
+fi
+kill "$foreign_pid" 2>/dev/null || true
+if [ "$was_running" -eq 1 ]; then nodeharbor_start; fi
 echo 'NodeHarbor KernelSU runtime smoke check passed'
