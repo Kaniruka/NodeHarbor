@@ -33,6 +33,7 @@ func main() {
 func run() error {
 	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted listener address and port")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
+	listenerFile := flag.String("listener-file", "", "file for the actual loopback management listener URL")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	testIPLarkEndpoint := flag.String("test-iplark-endpoint", "", "explicit deterministic smoke-test IPLark endpoint")
 	testIPCheckEndpoint := flag.String("test-ipcheck-endpoint", "", "explicit deterministic smoke-test IPCheck endpoint")
@@ -135,6 +136,11 @@ func run() error {
 		log.Printf("Published Subscription listener is unavailable; serving loopback diagnostics only")
 	}
 	log.Printf("Management UI is available at %s", managementURL)
+	if *listenerFile != "" {
+		if err := os.WriteFile(*listenerFile, []byte(managementURL), 0o600); err != nil {
+			return fmt.Errorf("write management listener file: %w", err)
+		}
+	}
 	if *launchBrowser {
 		if err := openBrowser(managementURL); err != nil {
 			log.Printf("could not open the browser: %v", err)

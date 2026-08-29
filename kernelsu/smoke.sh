@@ -25,11 +25,8 @@ request_post() {
 was_running=0
 if nodeharbor_pid_is_owned "$(cat "$PID_FILE" 2>/dev/null)"; then was_running=1; fi
 nodeharbor_start || { echo 'NodeHarbor failed to start' >&2; exit 1; }
-if [ -n "${NODEHARBOR_LISTEN:-}" ]; then
-  base_url="http://$NODEHARBOR_LISTEN"
-else
-  base_url="http://127.0.0.1:9876"
-fi
+base_url=$(cat "$DATA_DIR/listener.url" 2>/dev/null)
+[ -n "$base_url" ] || { echo 'owned management listener file is missing' >&2; exit 1; }
 module_version=$(sed -n 's/^version=//p' "$MODDIR/module.prop")
 nodeharbor_version=$("$NODEHARBOR_BIN" --version 2>/dev/null)
 [ "$nodeharbor_version" = "$module_version" ] || { echo "NodeHarbor version mismatch: $nodeharbor_version" >&2; exit 1; }
@@ -67,8 +64,22 @@ installation_id_after=$(printf '%s' "$settings_after" | sed -n 's/.*"installatio
 [ "$installation_id_before" = "$installation_id_after" ] || { echo 'SQLite state did not persist across restart' >&2; exit 1; }
 
 "$MODDIR/action.sh" stop || { echo 'owned stop before foreign-process test failed' >&2; exit 1; }
-sleep 60 &
+foreign_dir="$TMP_DIR/foreign-mihomo"
+mkdir -p "$foreign_dir"
+cat >"$foreign_dir/config.yaml" <<'EOF'
+mixed-port: 17890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: silent
+EOF
+"$MODDIR/bin/nodeharbor-core" -d "$foreign_dir" -f "$foreign_dir/config.yaml" >"$foreign_dir/mihomo.log" 2>&1 &
 foreign_pid=$!
+sleep 1
+if ! kill -0 "$foreign_pid" 2>/dev/null; then
+  echo 'foreign Mihomo did not start for ownership test' >&2
+  exit 1
+fi
 printf '%s\n' "$foreign_pid" >"$PID_FILE"
 "$MODDIR/action.sh" stop || { echo 'stop lifecycle failed'; kill "$foreign_pid" 2>/dev/null || true; exit 1; }
 if ! kill -0 "$foreign_pid" 2>/dev/null; then
