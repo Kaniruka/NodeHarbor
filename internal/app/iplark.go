@@ -76,7 +76,11 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 		return 0, providerUnavailableWithCause("IPLark response could not be read", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, providerUnavailable(fmt.Sprintf("IPLark provider unavailable: HTTP %d", response.StatusCode))
+		reason := fmt.Sprintf("IPLark provider unavailable: HTTP %d", response.StatusCode)
+		if detail := providerResponseDetail(body); detail != "" {
+			reason += ": " + detail
+		}
+		return 0, providerUnavailable(reason)
 	}
 	if score, ok := parseIPLarkJSON(body); ok {
 		return score, nil
@@ -84,7 +88,11 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	if score, ok := parseIPLarkHTML(body); ok {
 		return score, nil
 	}
-	return 0, providerUnavailable("IPLark provider unavailable: score was not found")
+	reason := "IPLark provider unavailable: score was not found"
+	if detail := providerResponseDetail(body); detail != "" {
+		reason += ": " + detail
+	}
+	return 0, providerUnavailable(reason)
 }
 
 func parseIPLarkJSON(body []byte) (float64, bool) {

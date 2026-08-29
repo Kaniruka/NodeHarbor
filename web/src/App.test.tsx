@@ -214,6 +214,59 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
   await userEvent.click(screen.getByRole("button", { name: "保存评分设置" }));
 });
 
+test("evaluation results show independent stage diagnostics and provider availability", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json({
+      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70,
+      scoringProviders: [{ name: "iplark", enabled: true, status: "unavailable", failureStatus: "IPLark provider unavailable: HTTP 403" }],
+    });
+    if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json({
+      status: "completed", total: 1, passed: 0, failed: 1, publicationResult: "retained",
+      reason: "all scoring attempts failed; previous Publication Snapshot retained: IPLark provider unavailable: HTTP 403",
+      results: [{ name: "Mitce · node-1", state: "failed", attempts: 3, successful: 3, medianLatencyMs: 120, exitIdentity: "203.0.113.8", addressFamily: "ipv4", reason: "provider_unavailable: IPLark provider unavailable: HTTP 403", stages: {
+        availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "unavailable", reason: "IPLark provider unavailable: HTTP 403" },
+      } }],
+    });
+    if (url.endsWith("/api/evaluation-runs")) return Response.json([]);
+    if (url.endsWith("/api/logs")) return Response.json([]);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+
+  render(<App />);
+  expect(await screen.findByText("Availability Check")).toBeInTheDocument();
+  expect(screen.getByText("Exit Identity")).toBeInTheDocument();
+  expect(screen.getByText("IP Score")).toBeInTheDocument();
+  expect(screen.getByText("IPLark provider unavailable: HTTP 403")).toBeInTheDocument();
+  expect(screen.getByText("Scoring provider failed; previous Published Subscription retained")).toBeInTheDocument();
+  expect(screen.getByText(/previous Publication Snapshot retained/)).toBeInTheDocument();
+  expect(screen.getAllByText(/Unavailable/).length).toBeGreaterThan(0);
+});
+
+test("evaluation polling refreshes provider availability status", async () => {
+  let settingsCalls = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) {
+      settingsCalls += 1;
+      const unavailable = settingsCalls > 2;
+      return Response.json({ language: "en", installationId: "installation-1", scoringProvider: "iplark", scoringProviders: [{ name: "iplark", enabled: true, status: unavailable ? "unavailable" : "unverified", failureStatus: unavailable ? "fixture provider outage" : "" }] });
+    }
+    if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
+    if (url.endsWith("/api/evaluation-runs")) return Response.json([]);
+    if (url.endsWith("/api/logs")) return Response.json([]);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+
+  render(<App />);
+  expect(await screen.findByText(/IPLark: Unverified/)).toBeInTheDocument();
+  expect(await screen.findByText(/IPLark: Unavailable/, {}, { timeout: 2500 })).toBeInTheDocument();
+});
+
 test("History shows durable run diagnostics and links to configuration export", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);

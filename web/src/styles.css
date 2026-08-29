@@ -2,6 +2,10 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #e8f2f8;
   background: #06131f;
+  --text: #e8f2f8;
+  --muted: #819eae;
+  --text-muted: #9ab2bf;
+  --surface-muted: rgba(4, 20, 31, 0.72);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -436,15 +440,70 @@ button:focus-visible, a:focus-visible {
   .importTabs { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
   .primaryButton { width: 100%; }
 }
-.nodeResults { margin-top: 1rem; display: grid; gap: .45rem; }
-.nodeResults h4 { margin: 0; font-size: .9rem; }
-.nodeResult { display: grid; grid-template-columns: 1fr auto; gap: .2rem .75rem; padding: .55rem .7rem; border-radius: .5rem; background: var(--surface-muted, #f3f4f6); }
-.nodeResult small { grid-column: 1 / -1; color: var(--text-muted, #6b7280); overflow-wrap: anywhere; }
-.nodeResult--rejected { border-left: 3px solid #dc2626; }
-.providerStatuses { margin-top: 1rem; display: grid; gap: .35rem; color: var(--text-muted, #6b7280); }
-.providerStatuses strong { color: var(--text, #111827); }
+.evaluationSettings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid rgba(151, 190, 207, 0.12);
+  border-radius: 14px;
+  background: rgba(4, 20, 31, 0.42);
+}
+
+.evaluationSettings label { display: grid; gap: 7px; align-content: start; color: #9db4c0; font-size: .78rem; font-weight: 700; }
+.evaluationSettings label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; padding-top: 25px; }
+.evaluationSettings input:not([type="checkbox"]), .evaluationSettings select {
+  width: 100%;
+  min-height: 39px;
+  border: 1px solid rgba(151, 190, 207, 0.2);
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: #e8f2f8;
+  background: #0b2535;
+  color-scheme: dark;
+  outline: none;
+}
+.evaluationSettings input:not([type="checkbox"]):focus, .evaluationSettings select:focus { border-color: rgba(104, 224, 207, 0.56); box-shadow: 0 0 0 3px rgba(104, 224, 207, 0.08); }
+.evaluationSettings button { align-self: end; min-height: 39px; border: 1px solid rgba(104, 224, 207, 0.2); border-radius: 9px; padding: 8px 12px; color: #dff8f4; background: rgba(33, 110, 108, 0.3); font-weight: 750; }
+
+.nodeResults { display: grid; gap: 12px; margin-top: 18px; }
+.nodeResult { display: grid; gap: 8px; padding: 14px; border: 1px solid rgba(151, 190, 207, 0.14); border-radius: 14px; background: rgba(4, 20, 31, 0.72); }
+.nodeResult small { color: #9ab2bf; overflow-wrap: anywhere; }
+.nodeResult--rejected { border-left: 3px solid #fa7765; }
+.nodeResult--accepted { border-left: 3px solid #45d8b4; }
+.nodeResultHeading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.nodeResultHeading strong { color: #dff8f4; font-size: .84rem; }
+.nodeResultReason { color: #ffaaa0 !important; }
+
+.nodeStages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
+.evaluationStage { display: grid; gap: 5px; min-width: 0; padding: 10px; border: 1px solid rgba(151, 190, 207, 0.13); border-radius: 10px; background: rgba(9, 30, 44, 0.8); }
+.evaluationStage > div { display: grid; gap: 4px; }
+.evaluationStage span { color: #9db4c0; font-size: .72rem; font-weight: 700; }
+.evaluationStage strong { color: #b9cbd3; font-size: .78rem; }
+.evaluationStage small { color: #9ab2bf; overflow-wrap: anywhere; }
+.evaluationStage--passed { border-color: rgba(69, 216, 180, 0.32); }
+.evaluationStage--passed strong { color: #6ce5c6; }
+.evaluationStage--unavailable, .evaluationStage--failed { border-color: rgba(250, 119, 101, 0.34); }
+.evaluationStage--unavailable strong, .evaluationStage--failed strong { color: #ffaaa0; }
+.evaluationStage--running strong { color: #f2d38b; }
+
+.providerStatuses { display: grid; gap: 7px; margin-top: 14px; padding: 13px 15px; border: 1px solid rgba(151, 190, 207, 0.12); border-radius: 12px; color: #9ab2bf; background: rgba(4, 20, 31, 0.42); }
+.providerStatuses strong { color: #dceaf0; font-size: .82rem; }
 .providerStatuses small { overflow-wrap: anywhere; }
-.nodeResult--accepted { border-left: 3px solid #16a34a; }
+.providerStatus { font-weight: 750; }
+.providerStatus--available { color: #6ce5c6; }
+.providerStatus--unavailable { color: #ffaaa0; }
+.providerStatus--unverified { color: #f2d38b; }
+
+.evaluationPanel > .sourceError { padding: 12px 14px; border: 1px solid rgba(250, 119, 101, 0.28); border-radius: 11px; background: rgba(112, 35, 31, 0.18); }
+.retentionNotice { margin: 10px 0 0; padding: 10px 12px; border: 1px solid rgba(242, 211, 139, 0.3); border-radius: 10px; color: #f2d38b; background: rgba(111, 82, 31, 0.18); font-size: .84rem; font-weight: 700; }
+
+@media (max-width: 720px) {
+  .nodeStages { grid-template-columns: 1fr; }
+  .nodeResultHeading { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .evaluationSettings label:has(input[type="checkbox"]) { padding-top: 0; }
+}
 .historyList, .historyLogs { display: grid; gap: .5rem; margin-top: 1rem; }
 .historyItem { display: grid; gap: .35rem; padding: .75rem; border: 1px solid rgba(151, 190, 207, 0.12); border-radius: .6rem; background: rgba(4, 20, 31, 0.42); }
 .historySummary { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; }

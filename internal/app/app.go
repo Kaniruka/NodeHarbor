@@ -263,7 +263,9 @@ type settingsResponse struct {
 type scoringProviderStatus struct {
 	Name          string `json:"name"`
 	Enabled       bool   `json:"enabled"`
+	Status        string `json:"status"`
 	FailureStatus string `json:"failureStatus,omitempty"`
+	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
 }
 
 func Open(ctx context.Context, config Config, dependencies Dependencies) (*Application, error) {
@@ -377,6 +379,10 @@ func (application *Application) initialize(ctx context.Context) error {
 		"ipcheck_enabled":                 "1",
 		"iplark_failure":                  "",
 		"ipcheck_failure":                 "",
+		"iplark_status":                   "unverified",
+		"ipcheck_status":                  "unverified",
+		"iplark_checked_at":               "",
+		"ipcheck_checked_at":              "",
 		"evaluation_interval_minutes":     "360",
 		"history_retention_days":          "7",
 		"availability_attempts":           fmt.Sprint(DefaultAvailabilityAttempts),
@@ -738,6 +744,18 @@ func (application *Application) readScoringProviderStatuses(ctx context.Context)
 		providers[index].Enabled = configured && (enabled == "1" || strings.EqualFold(enabled, "true"))
 		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_failure").Scan(&providers[index].FailureStatus); err != nil {
 			return nil, err
+		}
+		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_status").Scan(&providers[index].Status); err != nil {
+			return nil, err
+		}
+		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_checked_at").Scan(&providers[index].LastCheckedAt); err != nil {
+			return nil, err
+		}
+		if providers[index].FailureStatus != "" {
+			providers[index].Status = "unavailable"
+		}
+		if providers[index].Status == "" {
+			providers[index].Status = "unverified"
 		}
 	}
 	return providers, nil

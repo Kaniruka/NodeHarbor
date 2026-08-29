@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,32 @@ func TestIPCheckProviderMapsUnstableResponsesToProviderUnavailable(t *testing.T)
 				t.Fatalf("error=%v, want provider unavailable", err)
 			}
 		})
+	}
+}
+
+func TestIPCheckProviderIncludesHTTPStatusInAvailabilityDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	_, err := (IPCheckProvider{Client: server.Client(), Endpoint: server.URL, Timeout: time.Second}).Score(context.Background(), "203.0.113.8")
+	if err == nil || !errors.Is(err, errScoringProviderUnavailable) || err.Error() != "IPCheck.ing provider unavailable: HTTP 403" {
+		t.Fatalf("error=%v, want an HTTP status diagnostic", err)
+	}
+}
+
+func TestIPCheckProviderPreservesProviderErrorMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusTooManyRequests)
+		_, _ = response.Write([]byte(`{"error":"rate limited by provider","retry_after":60}`))
+	}))
+	defer server.Close()
+
+	_, err := (IPCheckProvider{Client: server.Client(), Endpoint: server.URL, Timeout: time.Second}).Score(context.Background(), "203.0.113.8")
+	if err == nil || !strings.Contains(err.Error(), "rate limited by provider") {
+		t.Fatalf("error=%v, want provider response detail", err)
 	}
 }
 

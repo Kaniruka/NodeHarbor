@@ -51,18 +51,28 @@ type evaluationLog struct {
 	Message   string `json:"message"`
 }
 type evaluationNodeResult struct {
-	NodeID          string         `json:"nodeId"`
-	Name            string         `json:"name"`
-	Config          map[string]any `json:"-"`
-	State           string         `json:"state"`
-	Attempts        int            `json:"attempts"`
-	Successful      int            `json:"successful"`
-	MedianLatencyMS float64        `json:"medianLatencyMs"`
-	ExitIdentity    string         `json:"exitIdentity,omitempty"`
-	AddressFamily   string         `json:"addressFamily,omitempty"`
-	IPScore         *float64       `json:"ipScore,omitempty"`
-	ScoreSource     string         `json:"scoreSource,omitempty"`
-	Reason          string         `json:"reason,omitempty"`
+	NodeID          string               `json:"nodeId"`
+	Name            string               `json:"name"`
+	Config          map[string]any       `json:"-"`
+	State           string               `json:"state"`
+	Attempts        int                  `json:"attempts"`
+	Successful      int                  `json:"successful"`
+	MedianLatencyMS float64              `json:"medianLatencyMs"`
+	ExitIdentity    string               `json:"exitIdentity,omitempty"`
+	AddressFamily   string               `json:"addressFamily,omitempty"`
+	IPScore         *float64             `json:"ipScore,omitempty"`
+	ScoreSource     string               `json:"scoreSource,omitempty"`
+	Reason          string               `json:"reason,omitempty"`
+	Stages          evaluationNodeStages `json:"stages"`
+}
+type evaluationNodeStage struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+type evaluationNodeStages struct {
+	Availability evaluationNodeStage `json:"availability"`
+	ExitIdentity evaluationNodeStage `json:"exitIdentity"`
+	IPScore      evaluationNodeStage `json:"ipScore"`
 }
 type evaluationRunResponse struct {
 	evaluationRun
@@ -123,7 +133,7 @@ func (application *Application) readAvailabilityConfig(ctx context.Context) (ava
 func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, trigger TEXT NOT NULL DEFAULT 'manual', phase TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, publication_result TEXT NOT NULL DEFAULT 'not_attempted', reason TEXT NOT NULL DEFAULT '')`,
-		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, score_source TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, score_source TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', config BLOB NOT NULL DEFAULT '', availability_status TEXT NOT NULL DEFAULT 'pending', availability_reason TEXT NOT NULL DEFAULT '', exit_identity_status TEXT NOT NULL DEFAULT 'pending', exit_identity_reason TEXT NOT NULL DEFAULT '', ip_score_status TEXT NOT NULL DEFAULT 'pending', ip_score_reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
 		`CREATE TABLE IF NOT EXISTS evaluation_sources (run_id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, enabled INTEGER NOT NULL, refresh_status TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '', last_success_at TEXT NOT NULL DEFAULT '', proxy_node_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, source_id))`,
 		`CREATE TABLE IF NOT EXISTS score_cache (provider TEXT NOT NULL, exit_identity TEXT NOT NULL, score REAL NOT NULL, address_family TEXT NOT NULL, scored_at TEXT NOT NULL, PRIMARY KEY(provider, exit_identity))`,
 		`CREATE TABLE IF NOT EXISTS evaluation_phases (run_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, name))`,
@@ -175,6 +185,23 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 			return err
 		}
 	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "availability_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
+		{name: "availability_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "exit_identity_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
+		{name: "exit_identity_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "ip_score_status", definition: "TEXT NOT NULL DEFAULT 'pending'"},
+		{name: "ip_score_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if !columns[column.name] {
+			if _, err := application.database.ExecContext(ctx, fmt.Sprintf("ALTER TABLE evaluation_results ADD COLUMN %s %s", column.name, column.definition)); err != nil {
+				return err
+			}
+		}
+	}
 	var runColumns = map[string]bool{}
 	runRows, err := application.database.QueryContext(ctx, `PRAGMA table_info(evaluation_runs)`)
 	if err != nil {
@@ -221,6 +248,45 @@ func (application *Application) registerEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/evaluation-runs", application.handleListEvaluationRuns)
 	mux.HandleFunc("GET /api/evaluation-runs/current", application.handleCurrentEvaluationRun)
 	mux.HandleFunc("GET /api/evaluation-runs/{id}", application.handleGetEvaluationRun)
+	mux.HandleFunc("POST /api/scoring-providers/diagnostic", application.handleScoringProviderDiagnostic)
+}
+
+type scoringProviderDiagnosticResult struct {
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	Score  *float64 `json:"score,omitempty"`
+	Error  string   `json:"error,omitempty"`
+}
+
+func (application *Application) handleScoringProviderDiagnostic(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ExitIdentity string `json:"exitIdentity"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || net.ParseIP(strings.TrimSpace(input.ExitIdentity)) == nil {
+		writeError(w, http.StatusBadRequest, errors.New("diagnostic requires a valid Exit Identity IP address"))
+		return
+	}
+	exitIdentity := strings.TrimSpace(input.ExitIdentity)
+	results := make([]scoringProviderDiagnosticResult, 0, 2)
+	for _, name := range []string{"iplark", "ipcheck"} {
+		provider, configured := application.scoringProviderByName(name)
+		enabled, enabledErr := application.scoringProviderEnabled(r.Context(), name)
+		if !configured || enabledErr != nil || !enabled {
+			results = append(results, scoringProviderDiagnosticResult{Name: name, Status: "disabled"})
+			continue
+		}
+		// Exit Identity is supplied by the caller here, so this connectivity check
+		// must not overwrite the evaluation status established through Test Channel.
+		score, err := provider.Score(r.Context(), exitIdentity)
+		if err != nil {
+			results = append(results, scoringProviderDiagnosticResult{Name: name, Status: "unavailable", Error: err.Error()})
+			continue
+		}
+		results = append(results, scoringProviderDiagnosticResult{Name: name, Status: "available", Score: &score})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exitIdentity": exitIdentity, "providers": results})
 }
 
 func (application *Application) handleExportSettings(w http.ResponseWriter, r *http.Request) {
@@ -409,11 +475,17 @@ func (application *Application) runResponse(ctx context.Context, run evaluationR
 		}
 		result.DurationMS = end.Sub(started).Seconds() * 1000
 	}
-	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, availability_status, availability_reason, exit_identity_status, exit_identity_reason, ip_score_status, ip_score_reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
 	if err == nil {
 		for rows.Next() {
 			var item evaluationNodeResult
-			if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason) == nil {
+			var availabilityStatus, availabilityReason, exitIdentityStatus, exitIdentityReason, ipScoreStatus, ipScoreReason string
+			if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason, &availabilityStatus, &availabilityReason, &exitIdentityStatus, &exitIdentityReason, &ipScoreStatus, &ipScoreReason) == nil {
+				item.Stages = evaluationNodeStages{
+					Availability: evaluationNodeStage{Status: availabilityStatus, Reason: availabilityReason},
+					ExitIdentity: evaluationNodeStage{Status: exitIdentityStatus, Reason: exitIdentityReason},
+					IPScore:      evaluationNodeStage{Status: ipScoreStatus, Reason: ipScoreReason},
+				}
 				result.Results = append(result.Results, item)
 			}
 		}
@@ -594,7 +666,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, configErr)
 			return
 		}
-		if _, err := application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason, config); err != nil {
+		if _, err := application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, config, availability_status, availability_reason, exit_identity_status, exit_identity_reason, ip_score_status, ip_score_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason, config, item.Stages.Availability.Status, item.Stages.Availability.Reason, item.Stages.ExitIdentity.Status, item.Stages.ExitIdentity.Reason, item.Stages.IPScore.Status, item.Stages.IPScore.Reason); err != nil {
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("store Evaluation Result: %w", err))
 			return
 		}
@@ -627,6 +699,8 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		return
 	}
 	if reason := application.evaluationFailureReason(ctx, evaluated); reason != nil {
+		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "failed", reason.Error())
+		application.setPublicationResult(ctx, id, "retained")
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, reason)
 		return
 	}
@@ -710,20 +784,28 @@ func (application *Application) evaluationFailureReason(ctx context.Context, res
 	if len(results) == 0 {
 		return nil
 	}
-	allScoringUnavailable := true
+	hasScoringFailure := false
+	hasScoredNode := false
 	hasProviderFailure := false
 	reasons := make([]string, 0, len(results))
+	seenReasons := make(map[string]struct{}, len(results))
 	for _, result := range results {
 		if strings.HasPrefix(result.Reason, "isolation_paused:") {
 			return fmt.Errorf("%s; previous Publication Snapshot retained", result.Reason)
 		}
+		if result.Stages.IPScore.Status == "passed" {
+			hasScoredNode = true
+		}
 		if strings.HasPrefix(result.Reason, "provider_unavailable:") || strings.HasPrefix(result.Reason, "score_unavailable:") {
-			reasons = append(reasons, result.Reason)
+			hasScoringFailure = true
+			if _, seen := seenReasons[result.Reason]; !seen {
+				seenReasons[result.Reason] = struct{}{}
+				reasons = append(reasons, result.Reason)
+			}
 			continue
 		}
-		allScoringUnavailable = false
 	}
-	if !allScoringUnavailable {
+	if !hasScoringFailure || hasScoredNode {
 		return nil
 	}
 	provider, err := application.configuredScoringProvider(ctx)
@@ -964,7 +1046,21 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 }
 
 func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) (result evaluationNodeResult) {
-	result = evaluationNodeResult{NodeID: node.ID, Name: node.Name, Config: cloneProxyNodeConfig(node.Config), State: "failed"}
+	result = evaluationNodeResult{
+		NodeID: node.ID,
+		Name:   node.Name,
+		Config: cloneProxyNodeConfig(node.Config),
+		State:  "failed",
+		Stages: evaluationNodeStages{
+			Availability: evaluationNodeStage{Status: "running"},
+			ExitIdentity: evaluationNodeStage{Status: "pending"},
+			IPScore:      evaluationNodeStage{Status: "pending"},
+		},
+	}
+	failStage := func(stage *evaluationNodeStage, reason string) {
+		stage.Status = "failed"
+		stage.Reason = reason
+	}
 	proxyNode := ProxyNode{Name: node.Name, Config: node.Config}
 	if releaser, ok := application.dependencies.TestChannel.(interface{ Release(ProxyNode) error }); ok {
 		defer func() {
@@ -981,6 +1077,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: availability channel cannot prove Proxy Node ownership"
+		failStage(&result.Stages.Availability, result.Reason)
 		return result
 	}
 	latencies := make([]time.Duration, 0, config.attempts)
@@ -1002,6 +1099,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 			if !probe.Verified {
 				cancel()
 				result.Reason = "test_channel_unverified: request ownership could not be proven"
+				failStage(&result.Stages.Availability, result.Reason)
 				return result
 			}
 			if probe.Success {
@@ -1025,21 +1123,30 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		if result.Reason == "" {
 			result.Reason = fmt.Sprintf("insufficient_successes: %d/%d", result.Successful, config.attempts)
 		}
+		failStage(&result.Stages.Availability, result.Reason)
 		return result
 	}
 	if result.MedianLatencyMS > config.maxLatency.Seconds()*1000 {
 		result.Reason = fmt.Sprintf("latency_exceeded: median latency is above %.0fms", config.maxLatency.Seconds()*1000)
+		failStage(&result.Stages.Availability, result.Reason)
 		return result
 	}
+	// A successful Availability Check should not retain a transient failure
+	// from an earlier attempt as the node's final diagnostic.
+	result.Reason = ""
+	result.Stages.Availability.Status = "passed"
 	if reason, paused := application.isolationFailure(ctx); paused {
 		result.Reason = "isolation_paused: " + reason
+		failStage(&result.Stages.ExitIdentity, result.Reason)
 		return result
 	}
 	discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: Test Channel does not expose family-specific Exit Identity discovery"
+		failStage(&result.Stages.ExitIdentity, result.Reason)
 		return result
 	}
+	result.Stages.ExitIdentity.Status = "running"
 	identities, identityErr := discoverExitIdentities(ctx, node, discoverer)
 	selectedIdentity, family, identityErr := selectExitIdentity(identities)
 	if identityErr == nil && selectedIdentity == "" && len(identities) == 0 {
@@ -1047,32 +1154,42 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	}
 	if identityErr != nil {
 		result.Reason = identityErr.Error()
+		failStage(&result.Stages.ExitIdentity, result.Reason)
 		return result
 	}
+	result.Stages.ExitIdentity.Status = "passed"
 	result.ExitIdentity = selectedIdentity
 	result.AddressFamily = family
 	if result.ExitIdentity == "" {
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
+		failStage(&result.Stages.ExitIdentity, result.Reason)
 		return result
 	}
 	if reason, paused := application.isolationFailure(ctx); paused {
 		result.Reason = "isolation_paused: " + reason
+		failStage(&result.Stages.IPScore, result.Reason)
 		return result
 	}
+	result.Stages.IPScore.Status = "running"
 	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, config.scoreCacheTTL, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
 		if errors.Is(err, errScoringProviderUnavailable) {
-			result.Reason = "provider_unavailable: scoring provider request failed"
+			result.Reason = "provider_unavailable: " + err.Error()
+			result.Stages.IPScore.Status = "unavailable"
+			result.Stages.IPScore.Reason = err.Error()
 			return result
 		}
 		if strings.HasPrefix(err.Error(), "isolation_paused:") {
 			result.Reason = err.Error()
+			failStage(&result.Stages.IPScore, result.Reason)
 			return result
 		}
 		result.Reason = "score_unavailable: " + err.Error()
+		failStage(&result.Stages.IPScore, result.Reason)
 		return result
 	}
+	result.Stages.IPScore.Status = "passed"
 	result.IPScore = &score
 	result.ScoreSource = source
 	threshold := application.scoringThreshold(ctx, scoringProviderKey(application.dependencies.Scoring))
@@ -1244,13 +1361,19 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 }
 
 func (application *Application) recordScoringProviderFailure(ctx context.Context, provider ScoringProvider, err error) {
-	key := scoringProviderKey(provider) + "_failure"
-	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, err.Error(), key)
+	application.updateScoringProviderStatus(ctx, provider, "unavailable", err.Error())
 }
 
 func (application *Application) clearScoringProviderFailure(ctx context.Context, provider ScoringProvider) {
-	key := scoringProviderKey(provider) + "_failure"
-	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = '' WHERE key = ?`, key)
+	application.updateScoringProviderStatus(ctx, provider, "available", "")
+}
+
+func (application *Application) updateScoringProviderStatus(ctx context.Context, provider ScoringProvider, status, failure string) {
+	providerKey := scoringProviderKey(provider)
+	now := application.clock.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, failure, providerKey+"_failure")
+	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, status, providerKey+"_status")
+	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, now, providerKey+"_checked_at")
 }
 
 func waitScoringJitter(ctx context.Context, maximum time.Duration) error {

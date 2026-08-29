@@ -1086,11 +1086,12 @@ func TestScoringProviderRegistryExposesIndependentEnabledAndFailureState(t *test
 		ScoringProviders []struct {
 			Name          string `json:"name"`
 			Enabled       bool   `json:"enabled"`
+			Status        string `json:"status"`
 			FailureStatus string `json:"failureStatus"`
 		} `json:"scoringProviders"`
 	}
 	getJSON(t, server.URL+"/api/settings", &settings)
-	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[0].Name != "iplark" || !settings.ScoringProviders[0].Enabled || settings.ScoringProviders[1].Name != "ipcheck" || !settings.ScoringProviders[1].Enabled || settings.ScoringProviders[1].FailureStatus != "" {
+	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[0].Name != "iplark" || !settings.ScoringProviders[0].Enabled || settings.ScoringProviders[0].Status != "unverified" || settings.ScoringProviders[1].Name != "ipcheck" || !settings.ScoringProviders[1].Enabled || settings.ScoringProviders[1].Status != "unverified" || settings.ScoringProviders[1].FailureStatus != "" {
 		t.Fatalf("initial provider settings=%+v", settings.ScoringProviders)
 	}
 
@@ -1131,6 +1132,145 @@ func TestScoringProviderFailureStatusDistinguishesOutageFromLowScore(t *testing.
 		t.Fatalf("provider diagnostics=%+v", settings.ScoringProviders)
 	}
 
+}
+
+func TestProviderHTTPFailureKeepsStageDiagnosticsAndMarksProviderUnavailable(t *testing.T) {
+	providerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusForbidden)
+		_, _ = response.Write([]byte("blocked by provider"))
+	}))
+	defer providerServer.Close()
+
+	channel := &iplarkFixtureChannel{destination: providerServer.URL}
+	provider := app.IPLarkProvider{Endpoint: providerServer.URL + "/ipscore"}
+	server := openEvaluationApplicationWithProviders(t, &recordingUpstream{document: []byte("proxies:\n  - name: provider-stage-diagnostics\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, provider, map[string]app.ScoringProvider{"iplark": provider})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Reason            string `json:"reason"`
+		PublicationResult string `json:"publicationResult"`
+		Results           []struct {
+			Reason string `json:"reason"`
+			Stages struct {
+				Availability struct{ Status, Reason string } `json:"availability"`
+				ExitIdentity struct{ Status, Reason string } `json:"exitIdentity"`
+				IPScore      struct{ Status, Reason string } `json:"ipScore"`
+			} `json:"stages"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 {
+		t.Fatalf("run results=%+v", run.Results)
+	}
+	result := run.Results[0]
+	if result.Stages.Availability.Status != "passed" || result.Stages.ExitIdentity.Status != "passed" {
+		t.Fatalf("availability and Exit Identity stages=%+v", result.Stages)
+	}
+	if result.Stages.IPScore.Status != "unavailable" || !strings.Contains(result.Stages.IPScore.Reason, "HTTP 403") || !strings.Contains(result.Reason, "HTTP 403") {
+		t.Fatalf("provider stage=%+v result reason=%q", result.Stages.IPScore, result.Reason)
+	}
+	if run.PublicationResult != "retained" || !strings.Contains(run.Reason, "previous Publication Snapshot retained") {
+		t.Fatalf("retention diagnostic: publication=%q reason=%q", run.PublicationResult, run.Reason)
+	}
+
+	var settings struct {
+		ScoringProviders []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"scoringProviders"`
+	}
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[0].Status != "unavailable" {
+		t.Fatalf("provider status=%+v", settings.ScoringProviders)
+	}
+}
+
+func TestScoringProviderDiagnosticReportsEnabledProvidersWithoutChangingEvaluationStatus(t *testing.T) {
+	iplark := &namedScoring{name: "iplark", score: 88}
+	ipcheck := &namedScoring{name: "ipcheck", score: 66, err: errors.New("fixture rate limit")}
+	server := openEvaluationApplicationWithProviders(t, &recordingUpstream{document: []byte("proxies: []\n")}, &nodeValidationKernel{}, &identityChannel{}, iplark, map[string]app.ScoringProvider{"iplark": iplark, "ipcheck": ipcheck})
+
+	response := postJSONResponse(t, server.URL+"/api/scoring-providers/diagnostic", map[string]any{"exitIdentity": "203.0.113.8"})
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		t.Fatalf("diagnostic status=%d body=%q", response.StatusCode, body)
+	}
+	var diagnostic struct {
+		Providers []struct {
+			Name   string   `json:"name"`
+			Status string   `json:"status"`
+			Score  *float64 `json:"score"`
+			Error  string   `json:"error"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&diagnostic); err != nil {
+		_ = response.Body.Close()
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if len(diagnostic.Providers) != 2 || diagnostic.Providers[0].Name != "iplark" || diagnostic.Providers[0].Status != "available" || diagnostic.Providers[0].Score == nil || diagnostic.Providers[1].Name != "ipcheck" || diagnostic.Providers[1].Status != "unavailable" || diagnostic.Providers[1].Error != "fixture rate limit" {
+		t.Fatalf("diagnostic=%+v", diagnostic.Providers)
+	}
+	var settings struct {
+		ScoringProviders []struct {
+			Name          string `json:"name"`
+			Status        string `json:"status"`
+			FailureStatus string `json:"failureStatus"`
+		} `json:"scoringProviders"`
+	}
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[0].Status != "unverified" || settings.ScoringProviders[1].Status != "unverified" || settings.ScoringProviders[1].FailureStatus != "" {
+		t.Fatalf("diagnostic changed evaluation status=%+v", settings.ScoringProviders)
+	}
+}
+
+func TestMixedAvailabilityAndProviderFailuresKeepProviderDiagnosticSummary(t *testing.T) {
+	scoring := &namedScoring{name: "iplark", err: errors.New("fixture provider outage")}
+	channel := &mixedEvaluationChannel{}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: unavailable-node\n    type: ss\n    server: unavailable.example\n    port: 443\n  - name: provider-node\n    type: ss\n    server: provider.example\n    port: 443\n")}, &nodeValidationKernel{}, channel, scoring)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Status            string `json:"status"`
+		PublicationResult string `json:"publicationResult"`
+		Reason            string `json:"reason"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "failed" || run.PublicationResult != "retained" || !strings.Contains(run.Reason, "fixture provider outage") || !strings.Contains(run.Reason, "previous Publication Snapshot retained") {
+		t.Fatalf("mixed failure summary=%+v", run)
+	}
+}
+
+func TestEvaluationStagesDistinguishLowScoreFromUnavailable(t *testing.T) {
+	channel := &identityChannel{attempt: app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond, ExitIdentities: []app.ExitIdentityCandidate{{IP: "198.51.100.22", Verified: true}}}}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: low-score-stages\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, &recordingScoring{score: 69})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Results []struct {
+			State  string   `json:"state"`
+			Score  *float64 `json:"ipScore"`
+			Stages struct {
+				Availability struct{ Status string } `json:"availability"`
+				ExitIdentity struct{ Status string } `json:"exitIdentity"`
+				IPScore      struct{ Status string } `json:"ipScore"`
+			} `json:"stages"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 || run.Results[0].State != "failed" || run.Results[0].Score == nil || run.Results[0].Stages.Availability.Status != "passed" || run.Results[0].Stages.ExitIdentity.Status != "passed" || run.Results[0].Stages.IPScore.Status != "passed" {
+		t.Fatalf("low-score stages=%+v", run.Results)
+	}
 }
 
 func TestSelectedScoringProviderUsesItsOwnThreshold(t *testing.T) {
@@ -2200,6 +2340,30 @@ type availabilityChannel struct {
 	latencies []time.Duration
 	calls     int
 	outcome   string
+}
+
+type mixedEvaluationChannel struct{}
+
+func (channel *mixedEvaluationChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *mixedEvaluationChannel) ProbeAttempt(_ context.Context, node app.ProxyNode, _ string) (app.AvailabilityAttempt, error) {
+	if node.Config["name"] == "unavailable-node" {
+		return app.AvailabilityAttempt{Verified: true}, nil
+	}
+	return app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond, ExitIdentity: "203.0.113.9"}, nil
+}
+
+func (channel *mixedEvaluationChannel) DiscoverExitIdentities(_ context.Context, node app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	if node.Config["name"] == "unavailable-node" || family != "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: "203.0.113.9", Verified: true}}, nil
+}
+
+func (channel *mixedEvaluationChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
+	return boundTestChannelClient(), nil
 }
 
 type timeoutBudgetChannel struct {

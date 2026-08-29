@@ -72,7 +72,11 @@ func (provider IPCheckProvider) score(ctx context.Context, exitIdentity string, 
 		return 0, providerUnavailable("IPCheck.ing response could not be read")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, providerUnavailable("IPCheck.ing provider unavailable")
+		reason := fmt.Sprintf("IPCheck.ing provider unavailable: HTTP %d", response.StatusCode)
+		if detail := providerResponseDetail(body); detail != "" {
+			reason += ": " + detail
+		}
+		return 0, providerUnavailable(reason)
 	}
 	if score, ok := parseIPCheckJSON(body); ok {
 		return score, nil
@@ -80,7 +84,50 @@ func (provider IPCheckProvider) score(ctx context.Context, exitIdentity string, 
 	if score, ok := parseIPCheckHTML(body); ok {
 		return score, nil
 	}
-	return 0, providerUnavailable("IPCheck.ing score could not be parsed")
+	reason := "IPCheck.ing score could not be parsed"
+	if detail := providerResponseDetail(body); detail != "" {
+		reason += ": " + detail
+	}
+	return 0, providerUnavailable(reason)
+}
+
+func providerResponseDetail(body []byte) string {
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		return ""
+	}
+	detail := findProviderResponseDetail(value)
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) > 240 {
+		return detail[:240]
+	}
+	return detail
+}
+
+func findProviderResponseDetail(value any) string {
+	switch item := value.(type) {
+	case map[string]any:
+		for key, child := range item {
+			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+			if normalized == "error" || normalized == "message" || normalized == "detail" || normalized == "reason" {
+				if detail, ok := child.(string); ok && strings.TrimSpace(detail) != "" {
+					return detail
+				}
+			}
+		}
+		for _, child := range item {
+			if detail := findProviderResponseDetail(child); detail != "" {
+				return detail
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if detail := findProviderResponseDetail(child); detail != "" {
+				return detail
+			}
+		}
+	}
+	return ""
 }
 
 func parseIPCheckJSON(body []byte) (float64, bool) {
