@@ -1077,7 +1077,14 @@ func (channel *concurrencyChannel) ProbeAttempt(context.Context, app.ProxyNode, 
 }
 
 func (channel *concurrencyChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
+}
+
+func (channel *concurrencyChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	if family != "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: "203.0.113.8", Verified: true}}, nil
 }
 
 func (channel *timeoutBudgetChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
@@ -1097,7 +1104,14 @@ func (channel *timeoutBudgetChannel) ProbeAttempt(ctx context.Context, _ app.Pro
 }
 
 func (channel *timeoutBudgetChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
+}
+
+func (channel *timeoutBudgetChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	if family != "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: "203.0.113.8", Verified: true}}, nil
 }
 
 type surfingGuard struct{ status app.SurfingIsolationStatus }
@@ -1126,7 +1140,14 @@ func (channel *availabilityChannel) ProbeAttempt(_ context.Context, _ app.ProxyN
 }
 
 func (channel *availabilityChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
+}
+
+func (channel *availabilityChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	if family != "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: "203.0.113.8", Verified: channel.verified}}, nil
 }
 
 type unavailableUpstream struct{}
@@ -1168,7 +1189,7 @@ func (channel *recordingTestChannel) Probe(_ context.Context, node app.ProxyNode
 }
 
 func (channel *recordingTestChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
 }
 
 type identityChannel struct {
@@ -1183,8 +1204,32 @@ func (channel *identityChannel) ProbeAttempt(context.Context, app.ProxyNode, str
 	return channel.attempt, nil
 }
 
+func (channel *identityChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	candidates := channel.attempt.ExitIdentities
+	if len(candidates) == 0 && channel.attempt.ExitIdentity != "" {
+		candidates = []app.ExitIdentityCandidate{{IP: channel.attempt.ExitIdentity, Verified: channel.attempt.Verified}}
+	}
+	result := make([]app.ExitIdentityCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if addressFamilyForTest(candidate.IP) == family {
+			result = append(result, candidate)
+		}
+	}
+	if len(result) == 0 {
+		return nil, app.ErrUnavailable
+	}
+	return result, nil
+}
+
 func (channel *identityChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
+}
+
+func addressFamilyForTest(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "ipv6"
+	}
+	return "ipv4"
 }
 
 type familyIdentityChannel struct {
@@ -1209,7 +1254,7 @@ func (channel *familyIdentityChannel) DiscoverExitIdentities(_ context.Context, 
 }
 
 func (channel *familyIdentityChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
-	return &http.Client{}, nil
+	return boundTestChannelClient(), nil
 }
 
 func waitForEvaluationRun(t *testing.T, baseURL string) {
@@ -1261,6 +1306,33 @@ type namedScoring struct {
 	calls int
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (roundTripper roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTripper(request)
+}
+
+func boundTestChannelClient() *http.Client {
+	return &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+	})}
+}
+
+func useBoundTestChannelClient(client *http.Client) error {
+	if client == nil {
+		return errors.New("missing Test Channel HTTP client")
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://scoring-through-channel.invalid/", nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	return response.Body.Close()
+}
+
 func (scoring *namedScoring) Name() string { return scoring.name }
 
 func (scoring *namedScoring) Score(context.Context, string) (float64, error) {
@@ -1270,7 +1342,10 @@ func (scoring *namedScoring) Score(context.Context, string) (float64, error) {
 	return scoring.score, nil
 }
 
-func (scoring *namedScoring) ScoreWithClient(ctx context.Context, exitIdentity string, _ *http.Client) (float64, error) {
+func (scoring *namedScoring) ScoreWithClient(ctx context.Context, exitIdentity string, client *http.Client) (float64, error) {
+	if err := useBoundTestChannelClient(client); err != nil {
+		return 0, err
+	}
 	return scoring.Score(ctx, exitIdentity)
 }
 
@@ -1298,7 +1373,10 @@ func (scoring *countingScoring) Score(context.Context, string) (float64, error) 
 	return 80, nil
 }
 
-func (scoring *countingScoring) ScoreWithClient(ctx context.Context, exitIdentity string, _ *http.Client) (float64, error) {
+func (scoring *countingScoring) ScoreWithClient(ctx context.Context, exitIdentity string, client *http.Client) (float64, error) {
+	if err := useBoundTestChannelClient(client); err != nil {
+		return 0, err
+	}
 	return scoring.Score(ctx, exitIdentity)
 }
 
@@ -1309,6 +1387,9 @@ func (scoring *recordingScoring) Score(_ context.Context, exitIdentity string) (
 	return scoring.score, nil
 }
 
-func (scoring *recordingScoring) ScoreWithClient(ctx context.Context, exitIdentity string, _ *http.Client) (float64, error) {
+func (scoring *recordingScoring) ScoreWithClient(ctx context.Context, exitIdentity string, client *http.Client) (float64, error) {
+	if err := useBoundTestChannelClient(client); err != nil {
+		return 0, err
+	}
 	return scoring.Score(ctx, exitIdentity)
 }

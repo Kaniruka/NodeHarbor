@@ -110,10 +110,13 @@ type ExitIdentityDiscoveryChannel interface {
 }
 
 type TestChannelHTTPClient interface {
+	// HTTPClient must return the transport established by the verified Test Channel.
 	HTTPClient(context.Context, ProxyNode) (*http.Client, error)
 }
 
 type ChannelScoringProvider interface {
+	// ScoreWithClient must send the provider request through the supplied
+	// Test Channel HTTP client; direct provider clients are not accepted.
 	ScoreWithClient(context.Context, string, *http.Client) (float64, error)
 }
 

@@ -61,6 +61,8 @@ type availabilityConfig struct {
 	scoringJitter     time.Duration
 }
 
+var errScoringProviderUnavailable = errors.New("scoring provider unavailable")
+
 func (application *Application) readAvailabilityConfig(ctx context.Context) (availabilityConfig, error) {
 	settings, err := application.readSettings(ctx)
 	if err != nil {
@@ -564,12 +566,15 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = fmt.Sprintf("latency_exceeded: median latency is above %.0fms", config.maxLatency.Seconds()*1000)
 		return result
 	}
+	discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel)
+	if !ok {
+		result.Reason = "test_channel_unverified: Test Channel does not expose family-specific Exit Identity discovery"
+		return result
+	}
+	identities, identityErr := discoverExitIdentities(ctx, node, discoverer)
 	selectedIdentity, family, identityErr := selectExitIdentity(identities)
-	if discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel); ok {
-		identities, identityErr = discoverExitIdentities(ctx, node, discoverer)
-		if identityErr == nil {
-			selectedIdentity, family, identityErr = selectExitIdentity(identities)
-		}
+	if identityErr == nil && selectedIdentity == "" && len(identities) == 0 {
+		identityErr = errors.New("no_exit_identity: Test Channel returned no exit identity")
 	}
 	if identityErr != nil {
 		result.Reason = identityErr.Error()
@@ -584,7 +589,11 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
-		result.Reason = "score_unavailable: " + err.Error()
+		reason := "score_unavailable: "
+		if errors.Is(err, errScoringProviderUnavailable) {
+			reason = "provider_unavailable: "
+		}
+		result.Reason = reason + err.Error()
 		return result
 	}
 	result.IPScore = &score
@@ -603,11 +612,14 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 
 func discoverExitIdentities(ctx context.Context, node evaluationNode, channel ExitIdentityDiscoveryChannel) ([]ExitIdentityCandidate, error) {
 	ipv4, ipv4Err := channel.DiscoverExitIdentities(ctx, ProxyNode{Name: node.Name, Config: node.Config}, "ipv4")
-	if ipv4Err == nil && containsAddressFamily(ipv4, "ipv4") {
+	if ipv4Err == nil && containsVerifiedAddressFamily(ipv4, "ipv4") {
 		return ipv4, nil
 	}
 	ipv6, ipv6Err := channel.DiscoverExitIdentities(ctx, ProxyNode{Name: node.Name, Config: node.Config}, "ipv6")
 	if ipv6Err != nil {
+		if containsAddressFamily(ipv4, "ipv4") {
+			return ipv4, nil
+		}
 		if ipv4Err != nil {
 			return nil, fmt.Errorf("IPv4 discovery failed: %v; IPv6 discovery failed: %w", ipv4Err, ipv6Err)
 		}
@@ -619,6 +631,15 @@ func discoverExitIdentities(ctx context.Context, node evaluationNode, channel Ex
 func containsAddressFamily(candidates []ExitIdentityCandidate, family string) bool {
 	for _, candidate := range candidates {
 		if addressFamily(candidate.IP) == family {
+			return true
+		}
+	}
+	return false
+}
+
+func containsVerifiedAddressFamily(candidates []ExitIdentityCandidate, family string) bool {
+	for _, candidate := range candidates {
+		if candidate.Verified && addressFamily(candidate.IP) == family {
 			return true
 		}
 	}
@@ -639,14 +660,14 @@ func selectExitIdentity(candidates []ExitIdentityCandidate) (string, string, err
 	if len(candidates) == 0 {
 		return "", "", nil
 	}
-	seen := make(map[string]bool, len(candidates))
+	var unverifiedFamily string
 	for _, candidate := range candidates {
-		if candidate.IP == "" || seen[candidate.IP] {
+		family := addressFamily(candidate.IP)
+		if family == "" {
 			continue
 		}
-		seen[candidate.IP] = true
-		if !candidate.Verified {
-			return "", "", errors.New("test_channel_unverified: exit identity ownership could not be proven")
+		if !candidate.Verified && unverifiedFamily == "" {
+			unverifiedFamily = family
 		}
 	}
 	for _, preferredFamily := range []string{"ipv4", "ipv6"} {
@@ -655,6 +676,9 @@ func selectExitIdentity(candidates []ExitIdentityCandidate) (string, string, err
 				return candidate.IP, preferredFamily, nil
 			}
 		}
+	}
+	if unverifiedFamily != "" {
+		return "", "", errors.New("test_channel_unverified: exit identity ownership could not be proven")
 	}
 	return "", "", errors.New("no_exit_identity: Test Channel returned no valid exit identity")
 }
@@ -688,7 +712,7 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool, runStartedAt time.Time) (float64, string, string, error) {
 	providerValue, err := application.configuredScoringProvider(ctx)
 	if err != nil {
-		return 0, addressFamily(exitIdentity), "", fmt.Errorf("Scoring Provider unavailable: %w", err)
+		return 0, addressFamily(exitIdentity), "", fmt.Errorf("%w: %v", errScoringProviderUnavailable, err)
 	}
 	provider, ok := providerValue.(ChannelScoringProvider)
 	if !ok {
