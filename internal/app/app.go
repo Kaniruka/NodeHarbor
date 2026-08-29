@@ -171,6 +171,7 @@ type Application struct {
 	handler            http.Handler
 	dependencies       Dependencies
 	evaluationMu       sync.Mutex
+	evaluationWG       sync.WaitGroup
 	scoreCacheMu       sync.Mutex
 	runID              string
 	pendingRun         bool
@@ -242,6 +243,7 @@ func (application *Application) Close() error {
 	if application.stopScheduler != nil {
 		application.stopScheduler()
 	}
+	application.evaluationWG.Wait()
 	closeErr := application.database.Close()
 	if channel, ok := application.dependencies.TestChannel.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, channel.Close())

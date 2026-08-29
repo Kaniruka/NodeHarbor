@@ -228,7 +228,7 @@ func (application *Application) startEvaluationRun(ctx context.Context, ignoreCa
 	}
 	application.runID = id
 	application.evaluationMu.Unlock()
-	go application.executeEvaluationRun(context.Background(), id, ignoreCache)
+	application.launchEvaluationRun(id, ignoreCache)
 	run, err := application.readEvaluationRun(ctx, id)
 	return run, true, err
 }
@@ -311,7 +311,11 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, nextID, now); err == nil {
 					application.runID = nextID
 					application.evaluationMu.Unlock()
-					go application.executeEvaluationRun(context.Background(), nextID, pendingIgnoreCache)
+					if application.lifecycleCtx.Err() == nil {
+						application.launchEvaluationRun(nextID, pendingIgnoreCache)
+					} else {
+						application.runID = ""
+					}
 					return
 				}
 			}
@@ -383,6 +387,14 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		}
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) launchEvaluationRun(id string, ignoreCache bool) {
+	application.evaluationWG.Add(1)
+	go func() {
+		defer application.evaluationWG.Done()
+		application.executeEvaluationRun(application.lifecycleCtx, id, ignoreCache)
+	}()
 }
 
 func (application *Application) evaluationRunStartedAt(ctx context.Context, id string) time.Time {

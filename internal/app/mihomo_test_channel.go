@@ -42,6 +42,8 @@ type mihomoTestLease struct {
 	command   *exec.Cmd
 	logFile   *os.File
 	directory string
+	address   string
+	pid       int
 	client    *http.Client
 }
 
@@ -132,6 +134,13 @@ func (channel *MihomoTestChannel) HTTPClient(ctx context.Context, node ProxyNode
 	channel.mu.Lock()
 	defer channel.mu.Unlock()
 	if lease := channel.leases[key]; lease != nil {
+		owned, ownershipErr := listenerOwnedBy(ctx, lease.address, lease.pid)
+		if ownershipErr != nil {
+			return nil, ownershipErr
+		}
+		if !owned {
+			return nil, errors.New("Mihomo Test Channel listener ownership could not be reverified")
+		}
 		return lease.client, nil
 	}
 	lease, err := channel.startLease(ctx, node)
@@ -207,7 +216,7 @@ func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode
 		closeErr := logFile.Close()
 		return nil, cleanup(errors.Join(fmt.Errorf("start isolated Mihomo Test Channel: %w", err), closeErr))
 	}
-	lease := &mihomoTestLease{command: command, logFile: logFile, directory: directory}
+	lease := &mihomoTestLease{command: command, logFile: logFile, directory: directory, address: proxyAddress, pid: command.Process.Pid}
 	readyContext, cancel := context.WithTimeout(ctx, mihomoTestChannelTimeout)
 	err = waitForLoopbackListener(readyContext, proxyAddress, command)
 	cancel()
