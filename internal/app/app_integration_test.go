@@ -296,6 +296,47 @@ func TestProxyNodeIdentitySurvivesReorderedEquivalentRefreshAndCrossSourceNamesS
 	}
 }
 
+func TestProxyNodeNamesRemainStableWhenAnotherSourceIntroducesACollision(t *testing.T) {
+	upstream := &configuredUpstream{document: []byte("proxies:\n  - name: alpha\n    type: ss\n    server: first.example\n    port: 443\n")}
+	server := openApplicationServer(t, upstream)
+	firstResponse := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Shared", "kind": "url", "url": "https://first.example/sub",
+	})
+	var first struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(firstResponse.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	_ = firstResponse.Body.Close()
+	firstNodes := readProxyNodes(t, server.URL, first.ID)
+	if len(firstNodes) != 1 {
+		t.Fatalf("first nodes=%+v", firstNodes)
+	}
+	firstName := firstNodes[0].Name
+
+	upstream.document = []byte("proxies:\n  - name: alpha\n    type: ss\n    server: second.example\n    port: 443\n")
+	secondResponse := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Shared", "kind": "url", "url": "https://second.example/sub",
+	})
+	var second struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(secondResponse.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	_ = secondResponse.Body.Close()
+
+	updatedFirstNodes := readProxyNodes(t, server.URL, first.ID)
+	secondNodes := readProxyNodes(t, server.URL, second.ID)
+	if len(updatedFirstNodes) != 1 || updatedFirstNodes[0].Name != firstName {
+		t.Fatalf("existing Proxy Node name changed from %q: %+v", firstName, updatedFirstNodes)
+	}
+	if len(secondNodes) != 1 || secondNodes[0].Name == firstName || !strings.HasPrefix(secondNodes[0].Name, "[Shared] alpha") {
+		t.Fatalf("colliding Proxy Node name=%+v", secondNodes)
+	}
+}
+
 type proxyNodeResponse struct {
 	ID           string         `json:"id"`
 	Fingerprint  string         `json:"fingerprint"`
@@ -1041,6 +1082,45 @@ func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
 	}
 }
 
+func TestPublicationValidationFailurePreservesSnapshotAndReportsReason(t *testing.T) {
+	kernel := &rejectingPublicationKernel{}
+	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, kernel, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	beforeResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := io.ReadAll(beforeResponse.Body)
+	_ = beforeResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "failed" || !strings.Contains(run.Reason, "publication validation failed") {
+		t.Fatalf("run=%+v", run)
+	}
+	afterResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := io.ReadAll(afterResponse.Body)
+	_ = afterResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("failed publication replaced the previous snapshot: before=%q after=%q", before, after)
+	}
+}
+
 func TestSurfingTUNPausesEvaluationBeforeProbe(t *testing.T) {
 	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}
 	server := openGuardedEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, surfingGuard{status: app.SurfingIsolationStatus{Mode: "tun", Reason: "Surfing TUN is active"}})
@@ -1232,6 +1312,17 @@ func (*nodeValidationKernel) ValidateNode(_ context.Context, node app.ProxyNode)
 	}
 	return nil
 }
+
+type rejectingPublicationKernel struct{}
+
+func (*rejectingPublicationKernel) Validate(_ context.Context, document []byte) error {
+	if bytes.Contains(document, []byte("[Publish] candidate")) {
+		return errors.New("publication validation failed")
+	}
+	return nil
+}
+
+func (*rejectingPublicationKernel) ValidateNode(context.Context, app.ProxyNode) error { return nil }
 
 type availabilityChannel struct {
 	verified  bool

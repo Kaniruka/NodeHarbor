@@ -502,10 +502,12 @@ func proxyNames(proxies []map[string]any) []string {
 
 func (application *Application) finishEvaluationRun(ctx context.Context, id string, total, passed, failed int, runErr error) {
 	status := "completed"
+	reason := ""
 	if runErr != nil {
 		status = "failed"
+		reason = runErr.Error()
 	}
-	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, finished_at = ? WHERE id = ?`, status, total, passed, failed, time.Now().UTC().Format(time.RFC3339Nano), id)
+	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = ?, total = ?, passed = ?, failed = ?, reason = ?, finished_at = ? WHERE id = ?`, status, total, passed, failed, reason, time.Now().UTC().Format(time.RFC3339Nano), id)
 }
 
 func (application *Application) evaluationNodes(ctx context.Context) ([]evaluationNode, error) {

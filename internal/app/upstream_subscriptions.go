@@ -562,11 +562,22 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 	if err != nil {
 		return err
 	}
+	previousNames, err := application.loadStoredProxyNodeNames(ctx, tx, subscriptionID)
+	if err != nil {
+		return err
+	}
+	preferredNames := make(map[string]string, len(existing)+len(previousNames))
+	for _, node := range existing {
+		preferredNames[node.ID] = node.Name
+	}
+	for id, name := range previousNames {
+		preferredNames[id] = name
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM proxy_nodes WHERE subscription_id = ?`, subscriptionID); err != nil {
 		return err
 	}
 	allNodes := append(existing, nodes...)
-	allocatedNames := allocateProxyNodeNames(allNodes)
+	allocatedNames := allocateProxyNodeNames(allNodes, preferredNames)
 	for index := range allNodes {
 		node := &allNodes[index]
 		node.Name = allocatedNames[node.ID]
@@ -591,7 +602,7 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 
 func (application *Application) loadStoredProxyNodes(ctx context.Context, tx *sql.Tx, excludingSubscriptionID string) ([]storedProxyNode, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT p.id, p.subscription_id, s.name, p.name, p.original_name, p.fingerprint, p.config, p.state, p.reason, p.created_at
-		FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.subscription_id <> ?`, excludingSubscriptionID)
+		FROM proxy_nodes p JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE p.subscription_id <> ? ORDER BY p.id`, excludingSubscriptionID)
 	if err != nil {
 		return nil, err
 	}
@@ -618,7 +629,24 @@ func (application *Application) loadStoredProxyNodes(ctx context.Context, tx *sq
 	return result, rows.Err()
 }
 
-func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
+func (application *Application) loadStoredProxyNodeNames(ctx context.Context, tx *sql.Tx, subscriptionID string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, name FROM proxy_nodes WHERE subscription_id = ? ORDER BY id`, subscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+	return names, rows.Err()
+}
+
+func allocateProxyNodeNames(nodes []storedProxyNode, preferredNames map[string]string) map[string]string {
 	groups := map[string][]*storedProxyNode{}
 	for index := range nodes {
 		node := &nodes[index]
@@ -626,39 +654,50 @@ func allocateProxyNodeNames(nodes []storedProxyNode) map[string]string {
 		groups[base] = append(groups[base], node)
 	}
 	result := make(map[string]string, len(nodes))
-	for base, group := range groups {
-		if len(group) == 1 {
-			result[group[0].ID] = base
+	used := map[string]bool{}
+	for _, node := range nodes {
+		base := fmt.Sprintf("[%s] %s", stableSourcePrefix(node.SourceName), node.OriginalName)
+		name := preferredNames[node.ID]
+		if name == "" || !strings.HasPrefix(name, base) || used[name] {
 			continue
 		}
+		result[node.ID] = name
+		used[name] = true
+	}
+	for base, group := range groups {
 		sort.Slice(group, func(left, right int) bool {
 			if group[left].Fingerprint != group[right].Fingerprint {
 				return group[left].Fingerprint < group[right].Fingerprint
 			}
-			return group[left].SubscriptionID < group[right].SubscriptionID
+			if group[left].SubscriptionID != group[right].SubscriptionID {
+				return group[left].SubscriptionID < group[right].SubscriptionID
+			}
+			return group[left].ID < group[right].ID
 		})
 		fingerprintCounts := map[string]int{}
 		for _, node := range group {
 			fingerprintCounts[node.Fingerprint]++
 		}
 		for _, node := range group {
-			suffix := node.Fingerprint
-			if fingerprintCounts[node.Fingerprint] > 1 {
-				suffix += "-" + node.SubscriptionID
+			if _, alreadyAllocated := result[node.ID]; alreadyAllocated {
+				continue
 			}
-			result[node.ID] = base + " (" + suffix + ")"
-		}
-	}
-	used := map[string][]string{}
-	for id, name := range result {
-		used[name] = append(used[name], id)
-	}
-	for name, ids := range used {
-		if len(ids) < 2 {
-			continue
-		}
-		for _, id := range ids {
-			result[id] = name + " [" + id + "]"
+			candidate := base
+			if used[candidate] {
+				suffix := node.Fingerprint
+				if fingerprintCounts[node.Fingerprint] > 1 {
+					suffix += "-" + node.SubscriptionID
+				}
+				candidate = base + " (" + suffix + ")"
+			}
+			if used[candidate] {
+				candidate += " [" + node.ID + "]"
+			}
+			for used[candidate] {
+				candidate += "-duplicate"
+			}
+			result[node.ID] = candidate
+			used[candidate] = true
 		}
 	}
 	return result
