@@ -92,8 +92,15 @@ func parseIPLarkJSON(body []byte) (float64, bool) {
 	if json.Unmarshal(body, &envelope) != nil {
 		return 0, false
 	}
-	if status, ok := stringField(envelope, "status"); ok && strings.ToLower(status) != "success" {
+	status, ok := stringField(envelope, "status")
+	if !ok || strings.ToLower(status) != "success" {
 		return 0, false
+	}
+	for key := range envelope {
+		normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+		if normalized == "error" || normalized == "captcha" || normalized == "challenge" {
+			return 0, false
+		}
 	}
 	if score, ok := directScore(envelope); ok {
 		return score, true
@@ -151,7 +158,7 @@ var iplarkHTMLScore = regexp.MustCompile(`(?is)<(?:div|span|p)[^>]*>\s*ip\s*scor
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
 	content := strings.ToLower(string(body))
-	for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human"} {
+	for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked", "error"} {
 		if strings.Contains(content, marker) {
 			return 0, false
 		}

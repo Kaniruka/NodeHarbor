@@ -289,12 +289,25 @@ func (channel *MihomoTestChannel) Close() error {
 }
 
 func stopMihomoLease(lease *mihomoTestLease) error {
+	var cleanupErr error
+	killed := false
 	if lease.command != nil && lease.command.Process != nil {
-		_ = lease.command.Process.Kill()
-		_ = lease.command.Wait()
+		if err := lease.command.Process.Kill(); err == nil {
+			killed = true
+		} else if !errors.Is(err, os.ErrProcessDone) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		if err := lease.command.Wait(); err != nil && !killed && (lease.command.ProcessState == nil || !lease.command.ProcessState.Exited()) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
 	if lease.logFile != nil {
-		_ = lease.logFile.Close()
+		if err := lease.logFile.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
-	return os.RemoveAll(lease.directory)
+	if err := os.RemoveAll(lease.directory); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	return cleanupErr
 }

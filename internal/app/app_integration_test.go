@@ -458,7 +458,7 @@ func TestDefaultAssemblyUsesIPLarkThroughTheVerifiedTestChannel(t *testing.T) {
 	var directRequests, channelRequests int
 	directServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		directRequests++
-		_, _ = w.Write([]byte(`{"data":{"ip_score":12}}`))
+		_, _ = w.Write([]byte(`{"status":"success","data":{"ip_score":12}}`))
 	}))
 	defer directServer.Close()
 	channelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +466,7 @@ func TestDefaultAssemblyUsesIPLarkThroughTheVerifiedTestChannel(t *testing.T) {
 		if r.URL.Query().Get("ip") != "198.51.100.77" {
 			t.Errorf("channel fixture ip=%q", r.URL.Query().Get("ip"))
 		}
-		_, _ = w.Write([]byte(`{"data":{"ip_score":88}}`))
+		_, _ = w.Write([]byte(`{"status":"success","data":{"ip_score":88}}`))
 	}))
 	defer channelServer.Close()
 

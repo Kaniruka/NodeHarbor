@@ -39,6 +39,7 @@ func TestIPLarkProviderParsesHTMLAndMapsFailures(t *testing.T) {
 		{name: "changed error page", body: `<html><body>Access denied — IP Score 91</body></html>`, status: 200, wantErr: true},
 		{name: "changed response", body: `{"status":"success","data":{"value":"unknown"}}`, status: 200, wantErr: true},
 		{name: "error metadata score", body: `{"status":"error","data":{"metadata":{"score":88}}}`, status: 200, wantErr: true},
+		{name: "captcha metadata score", body: `{"error":"captcha","data":{"ip_score":88}}`, status: 200, wantErr: true},
 		{name: "parse failure", body: `not an IP score`, status: 200, wantErr: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -511,11 +511,18 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 	return result, rows.Err()
 }
 
-func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) evaluationNodeResult {
-	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
+func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) (result evaluationNodeResult) {
+	result = evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
 	proxyNode := ProxyNode{Name: node.Name, Config: node.Config}
 	if releaser, ok := application.dependencies.TestChannel.(interface{ Release(ProxyNode) error }); ok {
-		defer func() { _ = releaser.Release(proxyNode) }()
+		defer func() {
+			if err := releaser.Release(proxyNode); err != nil {
+				result.State = "failed"
+				if result.Reason == "" {
+					result.Reason = "test_channel_cleanup_failed: " + err.Error()
+				}
+			}
+		}()
 	}
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
