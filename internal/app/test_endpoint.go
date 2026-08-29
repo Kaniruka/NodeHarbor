@@ -48,6 +48,10 @@ func (application *Application) handleTestEvaluation(response http.ResponseWrite
 		writeError(response, http.StatusBadGateway, err)
 		return
 	}
+	if exitIdentity == "" {
+		writeError(response, http.StatusBadGateway, errors.New("no_exit_identity: Test Channel returned no exit identity"))
+		return
+	}
 	provider, ok := application.dependencies.Scoring.(ChannelScoringProvider)
 	if !ok {
 		writeError(response, http.StatusBadGateway, errors.New("Scoring Provider cannot bind requests to the verified Test Channel"))
