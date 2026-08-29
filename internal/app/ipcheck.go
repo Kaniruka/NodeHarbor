@@ -97,12 +97,14 @@ func containsIPCheckFailureStatus(value any) bool {
 		for key, child := range item {
 			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
 			if normalized == "status" {
-				if status, ok := child.(string); ok {
-					switch strings.ToLower(strings.TrimSpace(status)) {
-					case "", "success", "ok", "available", "complete", "completed":
-					default:
-						return true
-					}
+				status, ok := child.(string)
+				if !ok {
+					return true
+				}
+				switch strings.ToLower(strings.TrimSpace(status)) {
+				case "", "success", "ok", "available", "complete", "completed":
+				default:
+					return true
 				}
 			}
 			if containsIPCheckFailureStatus(child) {

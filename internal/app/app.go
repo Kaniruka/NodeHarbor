@@ -591,7 +591,8 @@ func (application *Application) readScoringProviderStatuses(ctx context.Context)
 		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_enabled").Scan(&enabled); err != nil {
 			return nil, err
 		}
-		providers[index].Enabled = enabled == "1" || strings.EqualFold(enabled, "true")
+		_, configured := application.scoringProviderByName(name)
+		providers[index].Enabled = configured && (enabled == "1" || strings.EqualFold(enabled, "true"))
 		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_failure").Scan(&providers[index].FailureStatus); err != nil {
 			return nil, err
 		}
