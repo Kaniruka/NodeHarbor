@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,8 +15,9 @@ import (
 // ProcSurfingRuntimeInspector reads only Linux process metadata. It never
 // opens Surfing configuration, module, firewall, route, or DNS files.
 type ProcSurfingRuntimeInspector struct {
-	ProcRoot string
-	NetRoot  string
+	ProcRoot            string
+	NetRoot             string
+	ProbeTargetVerifier SurfingProbeTargetVerifier
 }
 
 func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (SurfingRuntimeInspection, error) {
@@ -30,6 +32,10 @@ func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (Surfi
 	if err != nil {
 		return SurfingRuntimeInspection{}, fmt.Errorf("read process table: %w", err)
 	}
+	verifier := inspector.ProbeTargetVerifier
+	if verifier == nil {
+		verifier = LoopbackSurfingProbeTargetVerifier{}
+	}
 	var candidate *SurfingRuntimeInspection
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
@@ -41,12 +47,12 @@ func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (Surfi
 		}
 		cmdline, err := os.ReadFile(filepath.Join(root, entry.Name(), "cmdline"))
 		if err != nil {
-			continue
+			return SurfingRuntimeInspection{}, fmt.Errorf("read process %s command line: %w", entry.Name(), err)
 		}
 		if !isSurfingProcess(string(cmdline)) {
 			continue
 		}
-		inspection, err := inspectSurfingProcess(root, cmdline)
+		inspection, err := inspectSurfingProcess(ctx, root, cmdline, verifier)
 		if err != nil {
 			return SurfingRuntimeInspection{}, err
 		}
@@ -59,7 +65,11 @@ func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (Surfi
 		}
 	}
 	if candidate != nil {
-		if inspector.tunInterfaceActive(root) {
+		tunActive, err := inspector.tunInterfaceActive(root)
+		if err != nil {
+			return SurfingRuntimeInspection{}, fmt.Errorf("inspect network interfaces: %w", err)
+		}
+		if tunActive {
 			candidate.Mode = "tun"
 			candidate.ProcessIdentityVerified = false
 			candidate.TestChannelBypassVerified = false
@@ -70,7 +80,7 @@ func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (Surfi
 	return SurfingRuntimeInspection{Mode: "inactive"}, nil
 }
 
-func (inspector ProcSurfingRuntimeInspector) tunInterfaceActive(procRoot string) bool {
+func (inspector ProcSurfingRuntimeInspector) tunInterfaceActive(procRoot string) (bool, error) {
 	root := inspector.NetRoot
 	if root == "" {
 		root = filepath.Join(filepath.Dir(procRoot), "sys", "class", "net")
@@ -80,18 +90,18 @@ func (inspector ProcSurfingRuntimeInspector) tunInterfaceActive(procRoot string)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
 		if name == "tun" || strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "utun") || strings.HasPrefix(name, "clash") || strings.HasPrefix(name, "mihomo") || strings.HasPrefix(name, "singtun") {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-func inspectSurfingProcess(procRoot string, rawCmdline []byte) (SurfingRuntimeInspection, error) {
+func inspectSurfingProcess(ctx context.Context, procRoot string, rawCmdline []byte, verifier SurfingProbeTargetVerifier) (SurfingRuntimeInspection, error) {
 	args := splitProcCommandLine(rawCmdline)
 	mode := surfingMode(args)
 	if mode == "" {
@@ -109,8 +119,50 @@ func inspectSurfingProcess(procRoot string, rawCmdline []byte) (SurfingRuntimeIn
 	allowedGIDs := bypassIDs(args, "gid")
 	inspection.ProcessIdentityVerified = containsInt(allowedUIDs, uid)
 	inspection.TestChannelBypassVerified = inspection.ProcessIdentityVerified && containsInt(allowedGIDs, gid)
-	inspection.ProbeTargetBypassVerified = inspection.TestChannelBypassVerified
+	if inspection.TestChannelBypassVerified && verifier != nil {
+		verified, err := verifier.Verify(ctx)
+		if err != nil {
+			return inspection, nil
+		}
+		inspection.ProbeTargetBypassVerified = verified
+	}
 	return inspection, nil
+}
+
+// LoopbackSurfingProbeTargetVerifier uses a fresh loopback listener as an
+// independent target. Transparent-proxy rules must not recapture this target;
+// the verifier never contacts Surfing or an external scoring provider.
+type LoopbackSurfingProbeTargetVerifier struct{}
+
+func (LoopbackSurfingProbeTargetVerifier) Verify(ctx context.Context) (bool, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return false, err
+	}
+	defer listener.Close()
+	accepted := make(chan bool, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			accepted <- false
+			return
+		}
+		defer connection.Close()
+		remote, remoteOK := connection.RemoteAddr().(*net.TCPAddr)
+		accepted <- remoteOK && remote.IP.IsLoopback()
+	}()
+	dialer := &net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "tcp", listener.Addr().String())
+	if err != nil {
+		return false, err
+	}
+	_ = connection.Close()
+	select {
+	case verified := <-accepted:
+		return verified, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func isSurfingProcess(rawCmdline string) bool {

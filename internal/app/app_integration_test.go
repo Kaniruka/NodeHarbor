@@ -1956,6 +1956,63 @@ func TestSurfingIsolationStateChangePausesBeforeNextProxyNode(t *testing.T) {
 	}
 }
 
+func TestSurfingTUNRetainsSnapshotAndManualRunRecovers(t *testing.T) {
+	guard := &mutableSurfingGuard{status: app.SurfingIsolationStatus{Mode: "inactive", Verified: true}}
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}
+	server := openGuardedEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, guard)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Guarded", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+	firstSnapshot := readPublishedDocument(t, server.URL)
+	if !strings.Contains(string(firstSnapshot), "candidate") {
+		t.Fatalf("successful run did not publish candidate: %q", firstSnapshot)
+	}
+
+	guard.setStatus(app.SurfingIsolationStatus{Mode: "tun", Reason: "Surfing TUN is active"})
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	waitForEvaluationRun(t, server.URL)
+	var paused struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &paused)
+	if paused.Status != "paused" || paused.Reason != "Surfing TUN is active" {
+		t.Fatalf("paused run=%+v", paused)
+	}
+	if retained := readPublishedDocument(t, server.URL); !bytes.Equal(retained, firstSnapshot) {
+		t.Fatalf("TUN pause replaced Publication Snapshot: before=%q after=%q", firstSnapshot, retained)
+	}
+
+	guard.setStatus(app.SurfingIsolationStatus{Mode: "inactive", Verified: true})
+	runEvaluation(t, server.URL, map[string]any{})
+	var recovered struct {
+		Status string `json:"status"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &recovered)
+	if recovered.Status != "completed" {
+		t.Fatalf("recovered run=%+v", recovered)
+	}
+}
+
+func TestVerifiedSurfingRedirectAllowsEvaluation(t *testing.T) {
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}}
+	server := openGuardedEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, surfingGuard{status: app.SurfingIsolationStatus{Mode: "redirect", Verified: true}})
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Redirect", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+	var run struct {
+		Status            string `json:"status"`
+		PublicationResult string `json:"publicationResult"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "completed" || run.PublicationResult != "published" {
+		t.Fatalf("verified redirect run=%+v", run)
+	}
+}
+
 func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel app.Kernel) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
@@ -2229,6 +2286,23 @@ type sequencedSurfingGuard struct {
 	mu       sync.Mutex
 	statuses []app.SurfingIsolationStatus
 	calls    int
+}
+
+type mutableSurfingGuard struct {
+	mu     sync.Mutex
+	status app.SurfingIsolationStatus
+}
+
+func (guard *mutableSurfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return guard.status, nil
+}
+
+func (guard *mutableSurfingGuard) setStatus(status app.SurfingIsolationStatus) {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	guard.status = status
 }
 
 func (guard *sequencedSurfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {

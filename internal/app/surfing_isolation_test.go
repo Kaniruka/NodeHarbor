@@ -106,6 +106,10 @@ func TestProcSurfingRuntimeInspectorUsesOnlyProcessMetadata(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
+			netRoot := filepath.Join(root, "net")
+			if err := os.MkdirAll(netRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.MkdirAll(filepath.Join(root, "self"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +122,7 @@ func TestProcSurfingRuntimeInspectorUsesOnlyProcessMetadata(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "123", "cmdline"), []byte(test.cmdline), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			inspection, err := (app.ProcSurfingRuntimeInspector{ProcRoot: root}).Inspect(context.Background())
+			inspection, err := (app.ProcSurfingRuntimeInspector{ProcRoot: root, NetRoot: netRoot}).Inspect(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}

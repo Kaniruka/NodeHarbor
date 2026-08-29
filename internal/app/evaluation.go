@@ -504,8 +504,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		return
 	}
 	if reason, paused := application.isolationFailure(ctx); paused {
-		application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
-		application.pauseEvaluationRun(ctx, id, reason)
+		application.pauseEvaluationAtPhase(ctx, id, "refresh", reason)
 		return
 	}
 	refreshed, err := application.refreshUpstreamSubscriptions(ctx)
@@ -525,8 +524,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		return
 	}
 	if reason, paused := application.isolationFailure(ctx); paused {
-		application.finishEvaluationPhase(ctx, id, "refresh", "paused", reason)
-		application.pauseEvaluationRun(ctx, id, reason)
+		application.pauseEvaluationAtPhase(ctx, id, "refresh", reason)
 		return
 	}
 	application.finishEvaluationPhase(ctx, id, "refresh", "completed", "")
@@ -617,6 +615,10 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
 		return
 	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		application.pauseEvaluationRun(ctx, id, reason)
+		return
+	}
 	if reason := application.evaluationFailureReason(ctx, evaluated); reason != nil {
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, reason)
 		return
@@ -670,6 +672,9 @@ func (application *Application) evaluationFailureReason(ctx context.Context, res
 	hasProviderFailure := false
 	reasons := make([]string, 0, len(results))
 	for _, result := range results {
+		if strings.HasPrefix(result.Reason, "isolation_paused:") {
+			return fmt.Errorf("%s; previous Publication Snapshot retained", result.Reason)
+		}
 		if strings.HasPrefix(result.Reason, "provider_unavailable:") || strings.HasPrefix(result.Reason, "score_unavailable:") {
 			reasons = append(reasons, result.Reason)
 			continue
@@ -745,6 +750,11 @@ func (application *Application) pauseEvaluationRun(ctx context.Context, id, reas
 	application.finishRunningPhases(ctx, id, "paused", reason)
 	application.setPublicationResult(ctx, id, "retained")
 	_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET status = 'paused', reason = ?, finished_at = ?, phase = '' WHERE id = ?`, reason, application.clock.Now().UTC().Format(time.RFC3339Nano), id)
+}
+
+func (application *Application) pauseEvaluationAtPhase(ctx context.Context, id, phase, reason string) {
+	application.finishEvaluationPhase(ctx, id, phase, "paused", reason)
+	application.pauseEvaluationRun(ctx, id, reason)
 }
 
 func (application *Application) runScheduler() {
@@ -960,6 +970,10 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = fmt.Sprintf("latency_exceeded: median latency is above %.0fms", config.maxLatency.Seconds()*1000)
 		return result
 	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		result.Reason = "isolation_paused: " + reason
+		return result
+	}
 	discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: Test Channel does not expose family-specific Exit Identity discovery"
@@ -978,6 +992,10 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	result.AddressFamily = family
 	if result.ExitIdentity == "" {
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
+		return result
+	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		result.Reason = "isolation_paused: " + reason
 		return result
 	}
 	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, config.scoreCacheTTL, ignoreCache, runStartedAt)
