@@ -39,9 +39,9 @@ func (application *Application) handleTestEvaluation(response http.ResponseWrite
 	}
 	candidates := probe.ExitIdentities
 	if len(candidates) == 0 && probe.ExitIdentity != "" {
-		// Probe predates the candidate contract; the legacy test adapter is
-		// trusted only for this explicitly test-only endpoint.
-		candidates = []ExitIdentityCandidate{{IP: probe.ExitIdentity, Verified: true}}
+		// Probe predates the candidate contract; legacy adapters must explicitly
+		// mark the single observed identity as verified.
+		candidates = []ExitIdentityCandidate{{IP: probe.ExitIdentity, Verified: probe.Verified}}
 	}
 	exitIdentity, family, err := selectExitIdentity(candidates)
 	if err != nil {

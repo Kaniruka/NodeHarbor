@@ -38,6 +38,7 @@ type evaluationNodeResult struct {
 	ExitIdentity    string   `json:"exitIdentity,omitempty"`
 	AddressFamily   string   `json:"addressFamily,omitempty"`
 	IPScore         *float64 `json:"ipScore,omitempty"`
+	ScoreSource     string   `json:"scoreSource,omitempty"`
 	Reason          string   `json:"reason,omitempty"`
 }
 type evaluationRunResponse struct {
@@ -83,7 +84,7 @@ func (application *Application) readAvailabilityConfig(ctx context.Context) (ava
 func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS evaluation_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', total INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '')`,
-		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
+		`CREATE TABLE IF NOT EXISTS evaluation_results (run_id TEXT NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, successful INTEGER NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, exit_identity TEXT NOT NULL DEFAULT '', address_family TEXT NOT NULL DEFAULT '', ip_score REAL, score_source TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id, node_id))`,
 		`CREATE TABLE IF NOT EXISTS score_cache (provider TEXT NOT NULL, exit_identity TEXT NOT NULL, score REAL NOT NULL, address_family TEXT NOT NULL, scored_at TEXT NOT NULL, PRIMARY KEY(provider, exit_identity))`,
 	}
 	for _, statement := range statements {
@@ -119,6 +120,11 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 	}
 	if !columns["ip_score"] {
 		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN ip_score REAL`); err != nil {
+			return err
+		}
+	}
+	if !columns["score_source"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN score_source TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -274,14 +280,14 @@ func (application *Application) readEvaluationRun(ctx context.Context, id string
 
 func (application *Application) runResponse(ctx context.Context, run evaluationRun) evaluationRunResponse {
 	result := evaluationRunResponse{evaluationRun: run, Results: []evaluationNodeResult{}}
-	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
 	if err != nil {
 		return result
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item evaluationNodeResult
-		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.Reason) == nil {
+		if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason) == nil {
 			result.Results = append(result.Results, item)
 		}
 	}
@@ -330,6 +336,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
 		return
 	}
+	runStartedAt := application.evaluationRunStartedAt(ctx, id)
 	availability, err := application.readAvailabilityConfig(ctx)
 	if err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
@@ -344,7 +351,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		go func() {
 			defer workers.Done()
 			for node := range jobs {
-				results <- application.evaluateNode(ctx, node, availability, ignoreCache)
+				results <- application.evaluateNode(ctx, node, availability, ignoreCache, runStartedAt)
 			}
 		}()
 	}
@@ -364,7 +371,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		} else {
 			failed++
 		}
-		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.Reason)
+		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason)
 		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
 	}
 	if passed > 0 {
@@ -374,6 +381,16 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		}
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) evaluationRunStartedAt(ctx context.Context, id string) time.Time {
+	var startedAt string
+	if err := application.database.QueryRowContext(ctx, `SELECT started_at FROM evaluation_runs WHERE id = ?`, id).Scan(&startedAt); err == nil {
+		if parsed, err := time.Parse(time.RFC3339Nano, startedAt); err == nil {
+			return parsed
+		}
+	}
+	return time.Now().UTC()
 }
 
 func (application *Application) pauseEvaluationRun(ctx context.Context, id, reason string) {
@@ -492,7 +509,7 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 	return result, rows.Err()
 }
 
-func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool) evaluationNodeResult {
+func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) evaluationNodeResult {
 	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
@@ -548,6 +565,12 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		return result
 	}
 	selectedIdentity, family, identityErr := selectExitIdentity(identities)
+	if discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel); ok {
+		identities, identityErr = discoverExitIdentities(ctx, node, discoverer)
+		if identityErr == nil {
+			selectedIdentity, family, identityErr = selectExitIdentity(identities)
+		}
+	}
 	if identityErr != nil {
 		result.Reason = identityErr.Error()
 		return result
@@ -558,13 +581,14 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
 		return result
 	}
-	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache)
+	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
 		result.Reason = "score_unavailable: " + err.Error()
 		return result
 	}
 	result.IPScore = &score
+	result.ScoreSource = source
 	threshold := application.scoringThreshold(ctx, scoringProviderKey(application.dependencies.Scoring))
 	if configured, err := application.configuredScoringProvider(ctx); err == nil {
 		threshold = application.scoringThreshold(ctx, scoringProviderKey(configured))
@@ -575,6 +599,30 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	}
 	result.State = "passed"
 	return result
+}
+
+func discoverExitIdentities(ctx context.Context, node evaluationNode, channel ExitIdentityDiscoveryChannel) ([]ExitIdentityCandidate, error) {
+	ipv4, ipv4Err := channel.DiscoverExitIdentities(ctx, ProxyNode{Name: node.Name, Config: node.Config}, "ipv4")
+	if ipv4Err == nil && containsAddressFamily(ipv4, "ipv4") {
+		return ipv4, nil
+	}
+	ipv6, ipv6Err := channel.DiscoverExitIdentities(ctx, ProxyNode{Name: node.Name, Config: node.Config}, "ipv6")
+	if ipv6Err != nil {
+		if ipv4Err != nil {
+			return nil, fmt.Errorf("IPv4 discovery failed: %v; IPv6 discovery failed: %w", ipv4Err, ipv6Err)
+		}
+		return nil, ipv6Err
+	}
+	return ipv6, nil
+}
+
+func containsAddressFamily(candidates []ExitIdentityCandidate, family string) bool {
+	for _, candidate := range candidates {
+		if addressFamily(candidate.IP) == family {
+			return true
+		}
+	}
+	return false
 }
 
 func exitIdentityCandidates(attempt AvailabilityAttempt) []ExitIdentityCandidate {
@@ -637,16 +685,16 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 	return value
 }
 
-func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool) (float64, string, error) {
-	providerValue := application.dependencies.Scoring
-	if configured, err := application.configuredScoringProvider(ctx); err == nil {
-		providerValue = configured
+func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool, runStartedAt time.Time) (float64, string, string, error) {
+	providerValue, err := application.configuredScoringProvider(ctx)
+	if err != nil {
+		return 0, addressFamily(exitIdentity), "", fmt.Errorf("Scoring Provider unavailable: %w", err)
 	}
 	provider, ok := providerValue.(ChannelScoringProvider)
 	if !ok {
-		return 0, addressFamily(exitIdentity), errors.New("Scoring Provider cannot bind requests to the verified Test Channel")
+		return 0, addressFamily(exitIdentity), "", errors.New("Scoring Provider cannot bind requests to the verified Test Channel")
 	}
-	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, ignoreCache, func() (float64, error) {
+	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, ignoreCache, runStartedAt, func() (float64, error) {
 		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
 		if !hasTransport {
 			return 0, errors.New("Test Channel cannot provide scoring transport")
@@ -687,33 +735,35 @@ func medianLatency(values []time.Duration) time.Duration {
 	return sorted[middle-1] + (sorted[middle]-sorted[middle-1])/2
 }
 
-func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, ignoreCache bool, scoreProvider func() (float64, error)) (float64, string, error) {
+func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, ignoreCache bool, runStartedAt time.Time, scoreProvider func() (float64, error)) (float64, string, string, error) {
 	application.scoreCacheMu.Lock()
 	defer application.scoreCacheMu.Unlock()
 	family := addressFamily(exitIdentity)
 	if family == "" {
-		return 0, "", errors.New("exit identity is not a valid IP address")
+		return 0, "", "", errors.New("exit identity is not a valid IP address")
 	}
 	providerKey := scoringProviderKey(provider)
 	var score float64
 	var scoredAt string
 	err := application.database.QueryRowContext(ctx, `SELECT score, scored_at FROM score_cache WHERE provider = ? AND exit_identity = ?`, providerKey, exitIdentity).Scan(&score, &scoredAt)
-	if !ignoreCache && err == nil {
+	if err == nil {
 		when, parseErr := time.Parse(time.RFC3339Nano, scoredAt)
 		now := time.Now().UTC()
-		if parseErr == nil && !when.After(now) && now.Sub(when) <= 24*time.Hour {
-			return score, family, nil
+		cacheIsFresh := parseErr == nil && !when.After(now) && now.Sub(when) <= 24*time.Hour
+		cacheWasWrittenThisRun := ignoreCache && parseErr == nil && !when.Before(runStartedAt) && !when.After(now)
+		if cacheIsFresh && (!ignoreCache || cacheWasWrittenThisRun) {
+			return score, family, "cache", nil
 		}
 	}
 	score, err = scoreProvider()
 	if err != nil {
-		return 0, family, err
+		return 0, family, "", err
 	}
 	_, err = application.database.ExecContext(ctx, `INSERT INTO score_cache(provider, exit_identity, score, address_family, scored_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(provider, exit_identity) DO UPDATE SET score = excluded.score, address_family = excluded.address_family, scored_at = excluded.scored_at`, providerKey, exitIdentity, score, family, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
-		return 0, family, fmt.Errorf("store IP Score cache: %w", err)
+		return 0, family, "", fmt.Errorf("store IP Score cache: %w", err)
 	}
-	return score, family, nil
+	return score, family, "provider", nil
 }
 
 func scoringProviderKey(provider ScoringProvider) string {

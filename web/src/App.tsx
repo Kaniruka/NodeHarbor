@@ -35,6 +35,8 @@ const messages = {
     evaluation: "评估运行",
     startEvaluation: "开始评估",
     ignoreCache: "本轮忽略评分缓存",
+    scoreCache: "复用 24 小时内缓存评分",
+    scoreProvider: "本轮请求评分源",
     running: "运行中",
     completed: "已完成",
     failed: "失败",
@@ -80,6 +82,8 @@ const messages = {
     evaluation: "Evaluation Run",
     startEvaluation: "Start evaluation",
     ignoreCache: "Ignore score cache for this run",
+    scoreCache: "Reused score cache within 24 hours",
+    scoreProvider: "Requested from scoring provider",
     running: "Running",
     completed: "Completed",
     failed: "Failed",
@@ -221,7 +225,7 @@ export default function App() {
 }
 
 type EvaluationText = typeof messages[Locale];
-type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; results: Array<{ name: string; state: string; attempts: number; successful: number; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
+type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; results: Array<{ name: string; state: string; attempts: number; successful: number; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; scoreSource?: string; reason?: string }> };
 
 function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
   const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
@@ -264,7 +268,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
      <div className="evaluationSettings"><label><span>{text.availabilityAttempts}</span><input type="number" min="1" max="10" value={attempts} onChange={(event) => setAttempts(Number(event.target.value))} /></label><label><span>{text.availabilityRequired}</span><input type="number" min="1" max="10" value={requiredSuccesses} onChange={(event) => setRequiredSuccesses(Number(event.target.value))} /></label><label><span>{text.availabilityTimeout}</span><input type="number" min="1" max="300" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label></div>
      <div className="evaluationSettings"><label><span>{text.availabilityMaxLatency}</span><input type="number" min="1" max="60000" value={maxLatency} onChange={(event) => setMaxLatency(Number(event.target.value))} /></label><label><span>{text.availabilityURLs}</span><input type="text" value={availabilityURLs} onChange={(event) => setAvailabilityURLs(event.target.value)} /></label><label><span>{text.evaluationWorkers}</span><input type="number" min="1" max="3" value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></label><label><span>{text.scoringJitter}</span><input type="number" min="0" max="1000" value={scoringJitter} onChange={(event) => setScoringJitter(Number(event.target.value))} /></label><button type="button" onClick={saveAvailabilitySettings}>{text.saveAvailabilitySettings}</button></div>
      {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
-     {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong><small>{text.probeSuccess(result.successful, result.attempts)}</small>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
+    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong><small>{text.probeSuccess(result.successful, result.attempts)}</small>{result.scoreSource && <small>{result.scoreSource === "cache" ? text.scoreCache : text.scoreProvider}</small>}{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
 }
 

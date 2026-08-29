@@ -133,7 +133,7 @@ func TestNonLoopbackCanReadOnlyHealthAndPublication(t *testing.T) {
 func TestBlackBoxEvaluationRequestTraversesReplaceableAdapters(t *testing.T) {
 	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: fixture-node\n    type: ss\n    server: example.test\n    port: 443\n")}
 	kernel := &recordingKernel{}
-	channel := &recordingTestChannel{result: app.ProbeResult{ExitIdentity: "203.0.113.7"}}
+	channel := &recordingTestChannel{result: app.ProbeResult{ExitIdentity: "203.0.113.7", Verified: true}}
 	scoring := &recordingScoring{score: 84}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="root"></div>`)}}
 	instance, err := app.Open(context.Background(), app.Config{
@@ -373,7 +373,7 @@ func TestEvaluationPrefersIPv4ExitIdentityFromTestChannel(t *testing.T) {
 			AddressFamily string `json:"addressFamily"`
 		} `json:"results"`
 	}
-	waitForEvaluationRun(t, server.URL, &run.Status)
+	waitForEvaluationRun(t, server.URL)
 	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
 	if run.Status != "completed" || len(run.Results) != 1 || run.Results[0].State != "passed" || run.Results[0].ExitIdentity != "198.51.100.7" || run.Results[0].AddressFamily != "ipv4" || scoring.exitIdentity != "198.51.100.7" {
 		t.Fatalf("run=%+v scored=%q", run, scoring.exitIdentity)
@@ -404,10 +404,31 @@ func TestEvaluationFallsBackToIPv6ExitIdentityWhenIPv4IsUnavailable(t *testing.T
 			AddressFamily string `json:"addressFamily"`
 		} `json:"results"`
 	}
-	waitForEvaluationRun(t, server.URL, &run.Status)
+	waitForEvaluationRun(t, server.URL)
 	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
 	if run.Status != "completed" || len(run.Results) != 1 || run.Results[0].State != "passed" || run.Results[0].ExitIdentity != "2001:db8::2" || run.Results[0].AddressFamily != "ipv6" || scoring.exitIdentity != "2001:db8::2" {
 		t.Fatalf("run=%+v scored=%q", run, scoring.exitIdentity)
+	}
+}
+
+func TestEvaluationRequestsIPv4BeforeFallingBackToIPv6(t *testing.T) {
+	channel := &familyIdentityChannel{fallback: "2001:db8::3"}
+	scoring := &recordingScoring{score: 84}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: family-order\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, scoring)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	var run struct {
+		Status  string `json:"status"`
+		Results []struct {
+			ExitIdentity  string `json:"exitIdentity"`
+			AddressFamily string `json:"addressFamily"`
+		} `json:"results"`
+	}
+	runEvaluation(t, server.URL, map[string]any{})
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "completed" || len(channel.families) != 2 || channel.families[0] != "ipv4" || channel.families[1] != "ipv6" || len(run.Results) != 1 || run.Results[0].ExitIdentity != channel.fallback || run.Results[0].AddressFamily != "ipv6" {
+		t.Fatalf("run=%+v families=%v", run, channel.families)
 	}
 }
 
@@ -553,7 +574,7 @@ func TestSharedExitIdentityReusesScoreAndKeepsAllQualifiedProxyNodes(t *testing.
 	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 2, "scoringJitterMs": 0})
 	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
 	_ = response.Body.Close()
-	runEvaluation(t, server.URL, map[string]any{})
+	runEvaluation(t, server.URL, map[string]any{"ignoreCache": true})
 	if scoring.callCount() != 1 {
 		t.Fatalf("shared Exit Identity was scored %d times", scoring.callCount())
 	}
@@ -1166,15 +1187,39 @@ func (channel *identityChannel) HTTPClient(context.Context, app.ProxyNode) (*htt
 	return &http.Client{}, nil
 }
 
-func waitForEvaluationRun(t *testing.T, baseURL string, status *string) {
+type familyIdentityChannel struct {
+	families []string
+	fallback string
+}
+
+func (channel *familyIdentityChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *familyIdentityChannel) ProbeAttempt(context.Context, app.ProxyNode, string) (app.AvailabilityAttempt, error) {
+	return app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond}, nil
+}
+
+func (channel *familyIdentityChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	channel.families = append(channel.families, family)
+	if family == "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: channel.fallback, Verified: true}}, nil
+}
+
+func (channel *familyIdentityChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
+	return &http.Client{}, nil
+}
+
+func waitForEvaluationRun(t *testing.T, baseURL string) {
 	t.Helper()
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
 		var current struct {
 			Status string `json:"status"`
 		}
 		getJSON(t, baseURL+"/api/evaluation-runs/current", &current)
-		*status = current.Status
-		if *status != "running" {
+		if current.Status != "running" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1191,17 +1236,7 @@ func runEvaluation(t *testing.T, baseURL string, input any) {
 		t.Fatalf("start evaluation status=%d body=%q", response.StatusCode, message)
 	}
 	_ = response.Body.Close()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		var current struct {
-			Status string `json:"status"`
-		}
-		getJSON(t, baseURL+"/api/evaluation-runs/current", &current)
-		if current.Status != "running" {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("evaluation run did not finish")
+	waitForEvaluationRun(t, baseURL)
 }
 
 type recordingScoring struct {

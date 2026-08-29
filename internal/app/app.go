@@ -60,6 +60,7 @@ type nodeRejection struct {
 type ProbeResult struct {
 	ExitIdentity   string
 	ExitIdentities []ExitIdentityCandidate
+	Verified       bool
 	Latency        time.Duration
 }
 
@@ -99,6 +100,13 @@ type AvailabilityAttempt struct {
 
 type AvailabilityChannel interface {
 	ProbeAttempt(context.Context, ProxyNode, string) (AvailabilityAttempt, error)
+}
+
+// ExitIdentityDiscoveryChannel explicitly requests an address family through
+// the already-proven Test Channel. The coordinator asks for IPv4 first and
+// asks for IPv6 only when no usable IPv4 candidate is available.
+type ExitIdentityDiscoveryChannel interface {
+	DiscoverExitIdentities(context.Context, ProxyNode, string) ([]ExitIdentityCandidate, error)
 }
 
 type TestChannelHTTPClient interface {
