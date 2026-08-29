@@ -19,7 +19,7 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
 	ipcheck := NewIPCheckProvider(nil)
 	testChannel := TestChannel(UnavailableTestChannel{})
-	var isolation SurfingIsolationGuard
+	var isolation SurfingIsolationGuard = InactiveSurfingIsolation{}
 	if mihomo, ok := kernel.(MihomoKernel); ok {
 		if mihomo.build.Platform == KernelSUMihomoBuild.Platform && mihomo.executablePath != "" {
 			moduleDirectory := filepath.Dir(filepath.Dir(mihomo.executablePath))
@@ -86,6 +86,16 @@ type UnavailableSurfingIsolation struct{}
 
 func (UnavailableSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
 	return SurfingIsolationStatus{Mode: "unknown", Reason: "Surfing isolation status is unavailable"}, nil
+}
+
+// InactiveSurfingIsolation is the platform result for targets where NodeHarbor
+// does not have a Surfing runtime to inspect. Keeping this result explicit
+// prevents the production dependency assembly from silently looking like a
+// partially configured test assembly.
+type InactiveSurfingIsolation struct{}
+
+func (InactiveSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
+	return SurfingIsolationStatus{Mode: "inactive", Verified: true, Reason: "Surfing is not active on this platform"}, nil
 }
 
 // KernelSUSurfingIsolation converts the platform's read-only observations

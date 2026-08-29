@@ -5,7 +5,14 @@ $root = [IO.Path]::GetFullPath($PackageDirectory)
 $executable = Join-Path $root 'nodeharbor.exe'
 $core = Join-Path $root 'nodeharbor-core.exe'
 $notices = Join-Path $root 'THIRD_PARTY_NOTICES'
+$expectedCoreDigest = 'F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761'
 $expectedFiles = @('README.md', 'THIRD_PARTY_NOTICES', 'nodeharbor-core.exe', 'nodeharbor.exe')
+$generatedPaths = @('smoke-data', 'smoke-fake.ready', 'smoke-fake.mode') | ForEach-Object { Join-Path $root $_ }
+foreach ($generatedPath in $generatedPaths) {
+    if (Test-Path -LiteralPath $generatedPath) {
+        Remove-Item -LiteralPath $generatedPath -Recurse -Force
+    }
+}
 
 foreach ($requiredFile in @($executable, $core, $notices)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -19,6 +26,23 @@ if ($actualDirectories.Count -ne 0) {
 $actualFiles = @(Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length).TrimStart('\') } | Sort-Object)
 if (@(Compare-Object $expectedFiles $actualFiles).Count -ne 0) {
     throw "Package contains unexpected or missing files: $($actualFiles -join ', ')"
+}
+$actualCoreDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $core).Hash.ToUpperInvariant()
+if ($actualCoreDigest -ne $expectedCoreDigest) {
+    throw "Package contains an unpinned Mihomo core: $actualCoreDigest"
+}
+$noticeText = Get-Content -Raw -LiteralPath $notices
+foreach ($requiredNotice in @(
+    'NodeHarbor bundles Mihomo v1.19.30 for Windows x64 and Android arm64-v8.',
+    'Windows x64 asset: mihomo-windows-amd64-v1.19.30.zip',
+    'Windows x64 executable SHA-256: F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761',
+    'License: GNU General Public License v3.0 or later (GPL-3.0-or-later)',
+    'Source: https://github.com/MetaCubeX/mihomo/tree/v1.19.30',
+    'License text: https://www.gnu.org/licenses/gpl-3.0.txt'
+)) {
+    if (-not $noticeText.Contains($requiredNotice)) {
+        throw "THIRD_PARTY_NOTICES is incomplete: missing '$requiredNotice'"
+    }
 }
 
 function Get-FreeTcpPort {
@@ -85,13 +109,14 @@ function Wait-For-HTTPStatus {
 $fakePort = Get-FreeTcpPort
 $appPort = Get-FreeTcpPort
 $readyFile = Join-Path $root 'smoke-fake.ready'
+$modeFile = Join-Path $root 'smoke-fake.mode'
 $subscription = @"
 proxies:
   - name: Smoke Proxy
     type: direct
 "@
-$fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $subscription -ScriptBlock {
-    param($Port, $ReadyFile, $Subscription)
+$fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $modeFile, $subscription -ScriptBlock {
+    param($Port, $ReadyFile, $ModeFile, $Subscription)
     $ErrorActionPreference = 'Stop'
     $listener = [Net.HttpListener]::new()
     $listener.Prefixes.Add("http://127.0.0.1:$Port/")
@@ -115,10 +140,17 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $subscription -ScriptB
                 $body = ''
                 $contentType = 'text/plain; charset=utf-8'
                 $status = 200
+                $mode = if (Test-Path -LiteralPath $ModeFile) { Get-Content -Raw -LiteralPath $ModeFile } else { '' }
                 switch ($path) {
                     '/subscription' {
-                        $body = $Subscription
-                        $contentType = 'application/yaml; charset=utf-8'
+                        if ($mode.Trim() -eq 'upstream-failure') {
+                            $status = 503
+                            $body = 'upstream unavailable'
+                        }
+                        else {
+                            $body = $Subscription
+                            $contentType = 'application/yaml; charset=utf-8'
+                        }
                     }
                     '/probe' {
                         $status = 204
@@ -127,8 +159,14 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $subscription -ScriptB
                         $body = '203.0.113.8'
                     }
                     '/score' {
-                        $body = '{"status":"success","data":{"ip_score":99}}'
-                        $contentType = 'application/json; charset=utf-8'
+                        if ($mode.Trim() -eq 'provider-failure') {
+                            $status = 503
+                            $body = 'provider unavailable'
+                        }
+                        else {
+                            $body = '{"status":"success","data":{"ip_score":99}}'
+                            $contentType = 'application/json; charset=utf-8'
+                        }
                     }
                     default {
                         $status = 404
@@ -155,6 +193,7 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $subscription -ScriptB
     }
 }
 $process = $null
+$oldPath = $env:PATH
 try {
     for ($attempt = 0; $attempt -lt 50; $attempt++) {
         if (Test-Path -LiteralPath $readyFile) { break }
@@ -166,6 +205,7 @@ try {
     $data = Join-Path $root 'smoke-data'
     $oldPackageSmoke = [Environment]::GetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', 'Process')
     [Environment]::SetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', '1', 'Process')
+    $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     $testArguments = @(
         '--test-iplark-endpoint', "http://127.0.0.1:$fakePort/score",
         '--test-ipv4-identity-endpoint', "http://127.0.0.1:$fakePort/identity",
@@ -237,6 +277,38 @@ try {
     }
     if ((Invoke-HTTP "$baseURL/api/settings").Status -ne 200) { throw 'loopback management access failed' }
 
+    $publicationBeforeFailures = $publication.Body
+    Set-Content -LiteralPath $modeFile -Value 'upstream-failure' -NoNewline
+    $failureRunResponse = Invoke-HTTP "$baseURL/api/evaluation-runs" 'POST' '{}'
+    if ($failureRunResponse.Status -ne 202) { throw "Could not start upstream failure Evaluation Run: HTTP $($failureRunResponse.Status)" }
+    $failureRunID = ($failureRunResponse.Body | ConvertFrom-Json).id
+    $failureRun = $null
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        $failureRun = (Invoke-HTTP "$baseURL/api/evaluation-runs/$failureRunID").Body | ConvertFrom-Json
+        if ($failureRun.status -in @('completed', 'failed', 'paused')) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($failureRun.status -ne 'failed' -or $failureRun.reason -notmatch 'all Upstream Subscriptions failed to refresh') {
+        throw "Upstream failure was not diagnosed: $($failureRun | ConvertTo-Json -Compress)"
+    }
+    if ((Invoke-HTTP "$baseURL/sub/clash.yaml").Body -ne $publicationBeforeFailures) { throw 'Upstream failure replaced the previous Publication Snapshot' }
+
+    Set-Content -LiteralPath $modeFile -Value 'provider-failure' -NoNewline
+    $failureRunResponse = Invoke-HTTP "$baseURL/api/evaluation-runs" 'POST' '{"ignoreCache":true}'
+    if ($failureRunResponse.Status -ne 202) { throw "Could not start provider failure Evaluation Run: HTTP $($failureRunResponse.Status)" }
+    $failureRunID = ($failureRunResponse.Body | ConvertFrom-Json).id
+    $failureRun = $null
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        $failureRun = (Invoke-HTTP "$baseURL/api/evaluation-runs/$failureRunID").Body | ConvertFrom-Json
+        if ($failureRun.status -in @('completed', 'failed', 'paused')) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($failureRun.status -ne 'failed' -or $failureRun.reason -notmatch 'all scoring') {
+        throw "Provider failure was not diagnosed: $($failureRun | ConvertTo-Json -Compress)"
+    }
+    if ((Invoke-HTTP "$baseURL/sub/clash.yaml").Body -ne $publicationBeforeFailures) { throw 'Provider failure replaced the previous Publication Snapshot' }
+    Remove-Item -LiteralPath $modeFile -Force
+
     $lanAddresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' -and $_.IPAddress -notmatch '^169\.254\.' } | Select-Object -ExpandProperty IPAddress -Unique)
     if ($lanAddresses.Count -eq 0) { throw 'No non-loopback IPv4 address is available for LAN boundary smoke testing' }
     $lanCheckPassed = $false
@@ -280,4 +352,6 @@ finally {
         Remove-Job -Job $fakeJob -Force -ErrorAction SilentlyContinue
     }
     if ([IO.File]::Exists($readyFile)) { [IO.File]::Delete($readyFile) }
+    if ([IO.File]::Exists($modeFile)) { [IO.File]::Delete($modeFile) }
+    $env:PATH = $oldPath
 }

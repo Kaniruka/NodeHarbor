@@ -53,6 +53,20 @@ func TestDefaultDependenciesUseOwnedMihomoTestChannel(t *testing.T) {
 	}
 }
 
+func TestDefaultDependenciesAlwaysProvideAnIsolationResult(t *testing.T) {
+	dependencies := app.DefaultDependencies(app.NewMihomoKernelWithBuild("nodeharbor-core", app.WindowsMihomoBuild))
+	if dependencies.Isolation == nil {
+		t.Fatal("default production dependencies have no Surfing isolation result")
+	}
+	status, err := dependencies.Isolation.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Verified || status.Mode != "inactive" {
+		t.Fatalf("default Windows isolation status=%+v, want verified inactive", status)
+	}
+}
+
 func TestDefaultDependenciesUseConfiguredSmokeEndpoints(t *testing.T) {
 	dependencies := app.DefaultDependenciesWithTestEndpoints(
 		app.NewMihomoKernelWithBuild("nodeharbor-core", app.WindowsMihomoBuild),
