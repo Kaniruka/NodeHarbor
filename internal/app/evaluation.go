@@ -19,6 +19,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var errIsolationPaused = errors.New("isolation paused")
+
 type evaluationRun struct {
 	ID                string  `json:"id"`
 	Status            string  `json:"status"`
@@ -638,7 +640,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
 		application.beginEvaluationPhase(ctx, id, "publication")
 		if err := application.publishQualifiedNodes(runContext, id); err != nil {
-			if ctx.Err() == nil && runContext.Err() != nil {
+			if errors.Is(err, errIsolationPaused) || (ctx.Err() == nil && runContext.Err() != nil) {
 				application.setPublicationResult(ctx, id, "retained")
 				application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor interrupted publication; previous Publication Snapshot retained")
 				return
@@ -874,8 +876,27 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 	if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
 		return fmt.Errorf("validate Published Subscription: %w", err)
 	}
-	_, err = application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, application.clock.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		return fmt.Errorf("%w: %s", errIsolationPaused, reason)
+	}
+	transaction, err := application.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, application.clock.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reason, paused := application.isolationFailure(ctx); paused {
+		return fmt.Errorf("%w: %s", errIsolationPaused, reason)
+	}
+	return transaction.Commit()
 }
 
 func proxyNames(proxies []map[string]any) []string {
