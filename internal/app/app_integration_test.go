@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -378,6 +379,163 @@ func TestEvaluationRunRejectsPartialFailureTimeoutHighLatencyAndUnknownOwnership
 	}
 }
 
+func TestAvailabilityFailureDoesNotCallScoringProvider(t *testing.T) {
+	scoring := &countingScoring{}
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: []byte("proxies:\n  - name: unavailable\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, &availabilityChannel{outcome: "partial", verified: true, latencies: []time.Duration{100 * time.Millisecond}}, scoring)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" || scoring.calls != 0 {
+		t.Fatalf("run=%+v scoring calls=%d", run, scoring.calls)
+	}
+}
+
+func TestAvailabilitySettingsArePersistedAndAppliedToTheNextRun(t *testing.T) {
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond, 300 * time.Millisecond}}
+	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: configured\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel)
+	putJSON(t, server.URL+"/api/settings", map[string]any{
+		"availabilityAttempts":          2,
+		"availabilityRequiredSuccesses": 2,
+		"availabilityTimeoutSeconds":    1,
+		"availabilityMaxLatencyMs":      500,
+		"availabilityURLs":              []string{"https://probe.example/204"},
+		"evaluationWorkerCount":         1,
+		"scoringJitterMs":               0,
+	})
+	var settings struct {
+		AvailabilityAttempts          int      `json:"availabilityAttempts"`
+		AvailabilityRequiredSuccesses int      `json:"availabilityRequiredSuccesses"`
+		AvailabilityTimeoutSeconds    int      `json:"availabilityTimeoutSeconds"`
+		AvailabilityMaxLatencyMS      int      `json:"availabilityMaxLatencyMs"`
+		AvailabilityURLs              []string `json:"availabilityURLs"`
+		EvaluationWorkerCount         int      `json:"evaluationWorkerCount"`
+		ScoringJitterMS               int      `json:"scoringJitterMs"`
+	}
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if settings.AvailabilityAttempts != 2 || settings.AvailabilityRequiredSuccesses != 2 || settings.AvailabilityTimeoutSeconds != 1 || settings.AvailabilityMaxLatencyMS != 500 || settings.EvaluationWorkerCount != 1 || settings.ScoringJitterMS != 0 || len(settings.AvailabilityURLs) != 1 || settings.AvailabilityURLs[0] != "https://probe.example/204" {
+		t.Fatalf("settings=%+v", settings)
+	}
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d", response.StatusCode)
+	}
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status  string `json:"status"`
+		Passed  int    `json:"passed"`
+		Results []struct {
+			Attempts int     `json:"attempts"`
+			Median   float64 `json:"medianLatencyMs"`
+		} `json:"results"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" || run.Passed != 1 || len(run.Results) != 1 || run.Results[0].Attempts != 2 || run.Results[0].Median != 200 || channel.calls != 2 {
+		t.Fatalf("run=%+v calls=%d", run, channel.calls)
+	}
+}
+
+func TestAvailabilityAttemptSharesOneTimeoutBudgetAcrossTargets(t *testing.T) {
+	channel := &timeoutBudgetChannel{}
+	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: configured\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel)
+	putJSON(t, server.URL+"/api/settings", map[string]any{
+		"availabilityAttempts":          1,
+		"availabilityRequiredSuccesses": 1,
+		"availabilityTimeoutSeconds":    1,
+		"availabilityURLs":              []string{"https://first.example/204", "https://second.example/204"},
+		"evaluationWorkerCount":         1,
+		"scoringJitterMs":               0,
+	})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+		Passed int    `json:"passed"`
+		Reason string `json:"reason"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" || run.Passed != 1 || run.Reason != "" || len(channel.deadlines) != 2 || !channel.deadlines[0].Equal(channel.deadlines[1]) {
+		t.Fatalf("run=%+v deadlines=%v", run, channel.deadlines)
+	}
+}
+
+func TestAvailabilityUsesTheTrueMedianForAnEvenNumberOfSamples(t *testing.T) {
+	channel := &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond, 400 * time.Millisecond}}
+	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: configured\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 4, "availabilityRequiredSuccesses": 4, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status  string `json:"status"`
+		Results []struct {
+			Median float64 `json:"medianLatencyMs"`
+		} `json:"results"`
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" || len(run.Results) != 1 || run.Results[0].Median != 250 {
+		t.Fatalf("run=%+v", run)
+	}
+}
+
+func TestEvaluationUsesAtMostThreeConcurrentProxyNodeWorkers(t *testing.T) {
+	channel := &concurrencyChannel{}
+	scoring := &countingScoring{}
+	document := []byte("proxies:\n  - name: one\n    type: ss\n    server: one.example\n    port: 443\n  - name: two\n    type: ss\n    server: two.example\n    port: 443\n  - name: three\n    type: ss\n    server: three.example\n    port: 443\n  - name: four\n    type: ss\n    server: four.example\n    port: 443\n")
+	server := openEvaluationApplicationWithScoring(t, &recordingUpstream{document: document}, &nodeValidationKernel{}, channel, scoring)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 3, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	var run struct {
+		Status string `json:"status"`
+	}
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+		if run.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != "completed" || channel.maxActive < 2 || channel.maxActive > 3 || scoring.calls != 1 {
+		t.Fatalf("run=%+v max concurrent workers=%d scoring calls=%d", run, channel.maxActive, scoring.calls)
+	}
+}
+
 func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
 	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: published\n    type: ss\n    server: example.test\n    port: 443\nrules:\n  - MATCH,DIRECT\ndns:\n  enable: true\n")}, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
 	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
@@ -453,9 +611,13 @@ func openTestApplicationWithKernel(t *testing.T, upstream app.Upstream, kernel a
 }
 
 func openEvaluationApplication(t *testing.T, upstream app.Upstream, kernel app.Kernel, channel app.TestChannel) *httptest.Server {
+	return openEvaluationApplicationWithScoring(t, upstream, kernel, channel, &recordingScoring{score: 80})
+}
+
+func openEvaluationApplicationWithScoring(t *testing.T, upstream app.Upstream, kernel app.Kernel, channel app.TestChannel, scoring app.ScoringProvider) *httptest.Server {
 	t.Helper()
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
-	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: &recordingScoring{score: 80}, Kernel: kernel, TestChannel: channel})
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, app.Dependencies{Upstream: upstream, Scoring: scoring, Kernel: kernel, TestChannel: channel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,6 +756,51 @@ type availabilityChannel struct {
 	outcome   string
 }
 
+type timeoutBudgetChannel struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+type concurrencyChannel struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func (channel *concurrencyChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *concurrencyChannel) ProbeAttempt(context.Context, app.ProxyNode, string) (app.AvailabilityAttempt, error) {
+	channel.mu.Lock()
+	channel.active++
+	if channel.active > channel.maxActive {
+		channel.maxActive = channel.active
+	}
+	channel.mu.Unlock()
+	time.Sleep(40 * time.Millisecond)
+	channel.mu.Lock()
+	channel.active--
+	channel.mu.Unlock()
+	return app.AvailabilityAttempt{Success: true, Verified: true, Latency: 10 * time.Millisecond, ExitIdentity: "203.0.113.8"}, nil
+}
+
+func (channel *timeoutBudgetChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *timeoutBudgetChannel) ProbeAttempt(ctx context.Context, _ app.ProxyNode, target string) (app.AvailabilityAttempt, error) {
+	deadline, _ := ctx.Deadline()
+	channel.mu.Lock()
+	channel.deadlines = append(channel.deadlines, deadline)
+	call := len(channel.deadlines)
+	channel.mu.Unlock()
+	if call == 1 && target != "https://second.example/204" {
+		return app.AvailabilityAttempt{}, errors.New("target unavailable")
+	}
+	return app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond, ExitIdentity: "203.0.113.8"}, nil
+}
+
 type surfingGuard struct{ status app.SurfingIsolationStatus }
 
 func (guard surfingGuard) Check(context.Context) (app.SurfingIsolationStatus, error) {
@@ -658,11 +865,26 @@ func (channel *recordingTestChannel) Probe(_ context.Context, node app.ProxyNode
 }
 
 type recordingScoring struct {
+	mu           sync.Mutex
 	exitIdentity string
 	score        float64
 }
 
+type countingScoring struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (scoring *countingScoring) Score(context.Context, string) (float64, error) {
+	scoring.mu.Lock()
+	defer scoring.mu.Unlock()
+	scoring.calls++
+	return 80, nil
+}
+
 func (scoring *recordingScoring) Score(_ context.Context, exitIdentity string) (float64, error) {
+	scoring.mu.Lock()
+	defer scoring.mu.Unlock()
 	scoring.exitIdentity = exitIdentity
 	return scoring.score, nil
 }

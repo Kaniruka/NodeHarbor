@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	urlpkg "net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -62,14 +63,22 @@ type ProbeResult struct {
 }
 
 const (
-	DefaultAvailabilityAttempts   = 3
-	DefaultAvailabilityTimeout    = 5 * time.Second
-	DefaultAvailabilityMaxLatency = 1500 * time.Millisecond
+	DefaultAvailabilityAttempts          = 3
+	DefaultAvailabilityRequiredSuccesses = 2
+	DefaultAvailabilityTimeout           = 5 * time.Second
+	DefaultAvailabilityMaxLatency        = 1500 * time.Millisecond
+	DefaultEvaluationWorkerCount         = 3
+	DefaultScoringJitter                 = 100 * time.Millisecond
 )
 
 var DefaultAvailabilityURLs = []string{
 	"https://www.gstatic.com/generate_204",
 	"https://cp.cloudflare.com/generate_204",
+}
+
+func defaultAvailabilityURLsJSON() string {
+	encoded, _ := json.Marshal(DefaultAvailabilityURLs)
+	return string(encoded)
 }
 
 type AvailabilityAttempt struct {
@@ -142,6 +151,7 @@ type Application struct {
 	handler       http.Handler
 	dependencies  Dependencies
 	evaluationMu  sync.Mutex
+	scoreCacheMu  sync.Mutex
 	runID         string
 	pendingRun    bool
 	lifecycleCtx  context.Context
@@ -161,13 +171,20 @@ type healthResponse struct {
 }
 
 type settingsResponse struct {
-	Language                  string `json:"language"`
-	InstallationID            string `json:"installationId"`
-	ScoringProvider           string `json:"scoringProvider"`
-	IPLarkThreshold           int    `json:"iplarkThreshold"`
-	IPCheckThreshold          int    `json:"ipcheckThreshold"`
-	EvaluationIntervalMinutes int    `json:"evaluationIntervalMinutes"`
-	HistoryRetentionDays      int    `json:"historyRetentionDays"`
+	Language                      string   `json:"language"`
+	InstallationID                string   `json:"installationId"`
+	ScoringProvider               string   `json:"scoringProvider"`
+	IPLarkThreshold               int      `json:"iplarkThreshold"`
+	IPCheckThreshold              int      `json:"ipcheckThreshold"`
+	EvaluationIntervalMinutes     int      `json:"evaluationIntervalMinutes"`
+	HistoryRetentionDays          int      `json:"historyRetentionDays"`
+	AvailabilityAttempts          int      `json:"availabilityAttempts"`
+	AvailabilityRequiredSuccesses int      `json:"availabilityRequiredSuccesses"`
+	AvailabilityTimeoutSecs       int      `json:"availabilityTimeoutSeconds"`
+	AvailabilityMaxLatencyMS      int      `json:"availabilityMaxLatencyMs"`
+	AvailabilityURLs              []string `json:"availabilityURLs"`
+	EvaluationWorkerCount         int      `json:"evaluationWorkerCount"`
+	ScoringJitterMS               int      `json:"scoringJitterMs"`
 }
 
 func Open(ctx context.Context, config Config, dependencies Dependencies) (*Application, error) {
@@ -221,7 +238,20 @@ func (application *Application) initialize(ctx context.Context) error {
 	if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES ('language', 'auto')`); err != nil {
 		return fmt.Errorf("initialize language: %w", err)
 	}
-	for key, value := range map[string]string{"scoring_provider": "iplark", "iplark_threshold": "70", "ipcheck_threshold": "70", "evaluation_interval_minutes": "360", "history_retention_days": "7"} {
+	for key, value := range map[string]string{
+		"scoring_provider":                "iplark",
+		"iplark_threshold":                "70",
+		"ipcheck_threshold":               "70",
+		"evaluation_interval_minutes":     "360",
+		"history_retention_days":          "7",
+		"availability_attempts":           fmt.Sprint(DefaultAvailabilityAttempts),
+		"availability_required_successes": fmt.Sprint(DefaultAvailabilityRequiredSuccesses),
+		"availability_timeout_seconds":    fmt.Sprint(int(DefaultAvailabilityTimeout / time.Second)),
+		"availability_max_latency_ms":     fmt.Sprint(int(DefaultAvailabilityMaxLatency / time.Millisecond)),
+		"availability_urls":               defaultAvailabilityURLsJSON(),
+		"evaluation_worker_count":         fmt.Sprint(DefaultEvaluationWorkerCount),
+		"scoring_jitter_ms":               fmt.Sprint(int(DefaultScoringJitter / time.Millisecond)),
+	} {
 		if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)`, key, value); err != nil {
 			return fmt.Errorf("initialize scoring setting: %w", err)
 		}
@@ -310,12 +340,19 @@ func (application *Application) handleGetSettings(response http.ResponseWriter, 
 
 func (application *Application) handlePutSettings(response http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Language                  string `json:"language"`
-		ScoringProvider           string `json:"scoringProvider"`
-		IPLarkThreshold           *int   `json:"iplarkThreshold"`
-		IPCheckThreshold          *int   `json:"ipcheckThreshold"`
-		EvaluationIntervalMinutes *int   `json:"evaluationIntervalMinutes"`
-		HistoryRetentionDays      *int   `json:"historyRetentionDays"`
+		Language                      string    `json:"language"`
+		ScoringProvider               string    `json:"scoringProvider"`
+		IPLarkThreshold               *int      `json:"iplarkThreshold"`
+		IPCheckThreshold              *int      `json:"ipcheckThreshold"`
+		EvaluationIntervalMinutes     *int      `json:"evaluationIntervalMinutes"`
+		HistoryRetentionDays          *int      `json:"historyRetentionDays"`
+		AvailabilityAttempts          *int      `json:"availabilityAttempts"`
+		AvailabilityRequiredSuccesses *int      `json:"availabilityRequiredSuccesses"`
+		AvailabilityTimeoutSecs       *int      `json:"availabilityTimeoutSeconds"`
+		AvailabilityMaxLatencyMS      *int      `json:"availabilityMaxLatencyMs"`
+		AvailabilityURLs              *[]string `json:"availabilityURLs"`
+		EvaluationWorkerCount         *int      `json:"evaluationWorkerCount"`
+		ScoringJitterMS               *int      `json:"scoringJitterMs"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -333,7 +370,39 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipcheck"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays} {
+	if input.AvailabilityURLs != nil {
+		if len(*input.AvailabilityURLs) == 0 || len(*input.AvailabilityURLs) > 10 {
+			writeError(response, http.StatusBadRequest, errors.New("availabilityURLs must contain between 1 and 10 URLs"))
+			return
+		}
+		for _, target := range *input.AvailabilityURLs {
+			parsed, err := urlpkg.ParseRequestURI(target)
+			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				writeError(response, http.StatusBadRequest, errors.New("availabilityURLs must contain absolute HTTP(S) URLs"))
+				return
+			}
+		}
+	}
+	attempts, required := DefaultAvailabilityAttempts, DefaultAvailabilityRequiredSuccesses
+	if err := application.database.QueryRowContext(request.Context(), `SELECT value FROM settings WHERE key = 'availability_attempts'`).Scan(&attempts); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if err := application.database.QueryRowContext(request.Context(), `SELECT value FROM settings WHERE key = 'availability_required_successes'`).Scan(&required); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if input.AvailabilityAttempts != nil {
+		attempts = *input.AvailabilityAttempts
+	}
+	if input.AvailabilityRequiredSuccesses != nil {
+		required = *input.AvailabilityRequiredSuccesses
+	}
+	if required > attempts {
+		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
+		return
+	}
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -352,6 +421,30 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 				valid = *number >= 3 && *number <= 7
 				message = "history retention must be between 3 and 7 days"
 			}
+			if name == "availability_attempts" {
+				valid = *number >= 1 && *number <= 10
+				message = "availability attempts must be between 1 and 10"
+			}
+			if name == "availability_required_successes" {
+				valid = *number >= 1 && *number <= 10
+				message = "required availability successes must be between 1 and 10"
+			}
+			if name == "availability_timeout_seconds" {
+				valid = *number >= 1 && *number <= 300
+				message = "availability timeout must be between 1 and 300 seconds"
+			}
+			if name == "availability_max_latency_ms" {
+				valid = *number >= 1 && *number <= 60000
+				message = "availability max latency must be between 1 and 60000 milliseconds"
+			}
+			if name == "evaluation_worker_count" {
+				valid = *number >= 1 && *number <= 3
+				message = "evaluation worker count must be between 1 and 3"
+			}
+			if name == "scoring_jitter_ms" {
+				valid = *number >= 0 && *number <= 1000
+				message = "scoring jitter must be between 0 and 1000 milliseconds"
+			}
 			if !valid {
 				writeError(response, http.StatusBadRequest, errors.New(message))
 				return
@@ -359,6 +452,17 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			stored = fmt.Sprint(*number)
 		}
 		if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = ?`, stored, name); err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if input.AvailabilityURLs != nil {
+		stored, err := json.Marshal(*input.AvailabilityURLs)
+		if err != nil {
+			writeError(response, http.StatusBadRequest, errors.New("invalid availability URLs"))
+			return
+		}
+		if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = 'availability_urls'`, string(stored)); err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return
 		}
@@ -387,6 +491,31 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 		return result, err
 	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'history_retention_days'`).Scan(&result.HistoryRetentionDays); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'availability_attempts'`).Scan(&result.AvailabilityAttempts); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'availability_required_successes'`).Scan(&result.AvailabilityRequiredSuccesses); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'availability_timeout_seconds'`).Scan(&result.AvailabilityTimeoutSecs); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'availability_max_latency_ms'`).Scan(&result.AvailabilityMaxLatencyMS); err != nil {
+		return result, err
+	}
+	var urls string
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'availability_urls'`).Scan(&urls); err != nil {
+		return result, err
+	}
+	if err := json.Unmarshal([]byte(urls), &result.AvailabilityURLs); err != nil {
+		return result, fmt.Errorf("read availability URLs: %w", err)
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'evaluation_worker_count'`).Scan(&result.EvaluationWorkerCount); err != nil {
+		return result, err
+	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_jitter_ms'`).Scan(&result.ScoringJitterMS); err != nil {
 		return result, err
 	}
 	return result, nil

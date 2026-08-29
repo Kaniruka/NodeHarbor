@@ -47,6 +47,15 @@ const messages = {
     saveSettings: "保存评分设置",
     interval: "自动运行间隔（分钟）",
     retention: "历史保留天数",
+    availabilityAttempts: "探测次数",
+    availabilityRequired: "最低成功次数",
+    availabilityTimeout: "单次超时（秒）",
+    availabilityMaxLatency: "最大中位延迟（毫秒）",
+    availabilityURLs: "探测地址（逗号分隔）",
+    evaluationWorkers: "并发节点数",
+    scoringJitter: "评分抖动上限（毫秒）",
+    saveAvailabilitySettings: "保存可用性设置",
+    probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} 次探测成功`,
   },
   en: {
     eyebrow: "Local proxy subscription curator",
@@ -82,6 +91,15 @@ const messages = {
     saveSettings: "Save scoring settings",
     interval: "Automatic interval (minutes)",
     retention: "History retention (days)",
+    availabilityAttempts: "Probe attempts",
+    availabilityRequired: "Required successes",
+    availabilityTimeout: "Attempt timeout (seconds)",
+    availabilityMaxLatency: "Maximum median latency (ms)",
+    availabilityURLs: "Probe URLs (comma-separated)",
+    evaluationWorkers: "Concurrent Proxy Nodes",
+    scoringJitter: "Scoring jitter limit (ms)",
+    saveAvailabilitySettings: "Save Availability Check settings",
+    probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} probes succeeded`,
   },
 } as const;
 
@@ -201,7 +219,7 @@ export default function App() {
 }
 
 type EvaluationText = typeof messages[Locale];
-type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; results: Array<{ name: string; state: string; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
+type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; results: Array<{ name: string; state: string; attempts: number; successful: number; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; reason?: string }> };
 
 function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
   const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
@@ -210,6 +228,13 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
   const [threshold, setThreshold] = useState(70);
   const [interval, setInterval] = useState(360);
   const [retention, setRetention] = useState(7);
+  const [attempts, setAttempts] = useState(3);
+  const [requiredSuccesses, setRequiredSuccesses] = useState(2);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(5);
+  const [maxLatency, setMaxLatency] = useState(1500);
+  const [availabilityURLs, setAvailabilityURLs] = useState("");
+  const [workers, setWorkers] = useState(3);
+  const [scoringJitter, setScoringJitter] = useState(100);
   useEffect(() => {
     let active = true;
     const load = () => fetch("/api/evaluation-runs/current").then(requireOK).then((response) => response.json()).then((value) => { if (active && Array.isArray(value.results) && typeof value.status === "string") setRun({ ...value, results: value.results }); }).catch(() => undefined);
@@ -217,7 +242,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     const timer = window.setInterval(load, 1000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
-  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { setProvider(settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"); setThreshold(settings[settings.scoringProvider === "ipcheck" ? "ipcheckThreshold" : "iplarkThreshold"] || 70); setInterval(settings.evaluationIntervalMinutes || 360); setRetention(settings.historyRetentionDays || 7); }).catch(() => undefined); }, []);
+  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { setProvider(settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"); setThreshold(settings[settings.scoringProvider === "ipcheck" ? "ipcheckThreshold" : "iplarkThreshold"] || 70); setInterval(settings.evaluationIntervalMinutes || 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); }).catch(() => undefined); }, []);
   async function start() {
     setBusy(true);
     try { const response = await fetch("/api/evaluation-runs", { method: "POST" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
@@ -225,13 +250,18 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
   async function saveScoringSettings() {
     await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, [provider === "ipcheck" ? "ipcheckThreshold" : "iplarkThreshold"]: threshold, evaluationIntervalMinutes: interval, historyRetentionDays: retention }) });
   }
+  async function saveAvailabilitySettings() {
+    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availabilityAttempts: attempts, availabilityRequiredSuccesses: requiredSuccesses, availabilityTimeoutSeconds: timeoutSeconds, availabilityMaxLatencyMs: maxLatency, availabilityURLs: availabilityURLs.split(",").map((value) => value.trim()).filter(Boolean), evaluationWorkerCount: workers, scoringJitterMs: scoringJitter }) }).then(requireOK);
+  }
   const statusLabel = text[run.status];
   return <section className="panel evaluationPanel" aria-labelledby="evaluation-heading">
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
     <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} onChange={(event) => setProvider(event.target.value as "iplark" | "ipcheck")}><option value="iplark">{text.iplark}</option><option value="ipcheck">{text.ipcheck}</option></select></label><label><span>{text.threshold}</span><input type="number" min="0" max="100" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
-    <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label></div>
-    {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
-    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
+     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label></div>
+     <div className="evaluationSettings"><label><span>{text.availabilityAttempts}</span><input type="number" min="1" max="10" value={attempts} onChange={(event) => setAttempts(Number(event.target.value))} /></label><label><span>{text.availabilityRequired}</span><input type="number" min="1" max="10" value={requiredSuccesses} onChange={(event) => setRequiredSuccesses(Number(event.target.value))} /></label><label><span>{text.availabilityTimeout}</span><input type="number" min="1" max="300" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label></div>
+     <div className="evaluationSettings"><label><span>{text.availabilityMaxLatency}</span><input type="number" min="1" max="60000" value={maxLatency} onChange={(event) => setMaxLatency(Number(event.target.value))} /></label><label><span>{text.availabilityURLs}</span><input type="text" value={availabilityURLs} onChange={(event) => setAvailabilityURLs(event.target.value)} /></label><label><span>{text.evaluationWorkers}</span><input type="number" min="1" max="3" value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></label><label><span>{text.scoringJitter}</span><input type="number" min="0" max="1000" value={scoringJitter} onChange={(event) => setScoringJitter(Number(event.target.value))} /></label><button type="button" onClick={saveAvailabilitySettings}>{text.saveAvailabilitySettings}</button></div>
+     {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
+     {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong><small>{text.probeSuccess(result.successful, result.attempts)}</small>{result.reason && <small>{result.reason}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}</div>)}</div>}
   </section>;
 }
 

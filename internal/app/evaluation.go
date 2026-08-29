@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -44,6 +46,36 @@ type evaluationNode struct {
 	ID     string
 	Name   string
 	Config map[string]any
+}
+
+type availabilityConfig struct {
+	attempts          int
+	requiredSuccesses int
+	timeout           time.Duration
+	maxLatency        time.Duration
+	urls              []string
+	workerCount       int
+	scoringJitter     time.Duration
+}
+
+func (application *Application) readAvailabilityConfig(ctx context.Context) (availabilityConfig, error) {
+	settings, err := application.readSettings(ctx)
+	if err != nil {
+		return availabilityConfig{}, err
+	}
+	config := availabilityConfig{
+		attempts:          settings.AvailabilityAttempts,
+		requiredSuccesses: settings.AvailabilityRequiredSuccesses,
+		timeout:           time.Duration(settings.AvailabilityTimeoutSecs) * time.Second,
+		maxLatency:        time.Duration(settings.AvailabilityMaxLatencyMS) * time.Millisecond,
+		urls:              append([]string(nil), settings.AvailabilityURLs...),
+		workerCount:       settings.EvaluationWorkerCount,
+		scoringJitter:     time.Duration(settings.ScoringJitterMS) * time.Millisecond,
+	}
+	if config.attempts < 1 || config.requiredSuccesses < 1 || config.requiredSuccesses > config.attempts || config.timeout <= 0 || config.maxLatency <= 0 || len(config.urls) == 0 || config.workerCount < 1 || config.workerCount > 3 || config.scoringJitter < 0 {
+		return availabilityConfig{}, errors.New("invalid Availability Check settings")
+	}
+	return config, nil
 }
 
 func (application *Application) initializeEvaluationRuns(ctx context.Context) error {
@@ -283,9 +315,35 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
 		return
 	}
+	availability, err := application.readAvailabilityConfig(ctx)
+	if err != nil {
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
+		return
+	}
 	passed, failed := 0, 0
-	for _, node := range nodes {
-		item := application.evaluateNode(ctx, node)
+	jobs := make(chan evaluationNode)
+	results := make(chan evaluationNodeResult, len(nodes))
+	var workers sync.WaitGroup
+	for worker := 0; worker < availability.workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for node := range jobs {
+				results <- application.evaluateNode(ctx, node, availability)
+			}
+		}()
+	}
+	go func() {
+		for _, node := range nodes {
+			jobs <- node
+		}
+		close(jobs)
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	for item := range results {
 		if item.State == "passed" {
 			passed++
 		} else {
@@ -419,36 +477,43 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 	return result, rows.Err()
 }
 
-func (application *Application) evaluateNode(ctx context.Context, node evaluationNode) evaluationNodeResult {
+func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig) evaluationNodeResult {
 	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: availability channel cannot prove Proxy Node ownership"
 		return result
 	}
-	latencies := make([]time.Duration, 0, DefaultAvailabilityAttempts)
-	for attempt := 0; attempt < DefaultAvailabilityAttempts; attempt++ {
+	latencies := make([]time.Duration, 0, config.attempts)
+	for attempt := 0; attempt < config.attempts; attempt++ {
 		result.Attempts++
 		var lastErr error
-		for _, target := range DefaultAvailabilityURLs {
-			probeCtx, cancel := context.WithTimeout(ctx, DefaultAvailabilityTimeout)
+		probeCtx, cancel := context.WithTimeout(ctx, config.timeout)
+		for _, target := range config.urls {
+			if err := probeCtx.Err(); err != nil {
+				lastErr = err
+				break
+			}
 			probe, err := channel.ProbeAttempt(probeCtx, ProxyNode{Name: node.Name, Config: node.Config}, target)
-			cancel()
 			if err != nil {
 				lastErr = err
 				continue
 			}
 			if !probe.Verified {
+				cancel()
 				result.Reason = "test_channel_unverified: request ownership could not be proven"
 				return result
 			}
 			if probe.Success {
+				lastErr = nil
+				cancel()
 				latencies = append(latencies, probe.Latency)
 				result.Successful++
 				result.ExitIdentity = probe.ExitIdentity
 				break
 			}
 		}
+		cancel()
 		if lastErr != nil && result.Reason == "" {
 			result.Reason = "probe_failed: " + lastErr.Error()
 		}
@@ -456,21 +521,21 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	if len(latencies) > 0 {
 		result.MedianLatencyMS = medianLatency(latencies).Seconds() * 1000
 	}
-	if result.Successful < 2 {
+	if result.Successful < config.requiredSuccesses {
 		if result.Reason == "" {
-			result.Reason = fmt.Sprintf("insufficient_successes: %d/%d", result.Successful, DefaultAvailabilityAttempts)
+			result.Reason = fmt.Sprintf("insufficient_successes: %d/%d", result.Successful, config.attempts)
 		}
 		return result
 	}
-	if result.MedianLatencyMS > DefaultAvailabilityMaxLatency.Seconds()*1000 {
-		result.Reason = "latency_exceeded: median latency is above 1500ms"
+	if result.MedianLatencyMS > config.maxLatency.Seconds()*1000 {
+		result.Reason = fmt.Sprintf("latency_exceeded: median latency is above %.0fms", config.maxLatency.Seconds()*1000)
 		return result
 	}
 	if result.ExitIdentity == "" {
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
 		return result
 	}
-	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel)
+	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter)
 	result.AddressFamily = family
 	if err != nil {
 		result.Reason = "score_unavailable: " + err.Error()
@@ -515,7 +580,7 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 	return value
 }
 
-func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel) (float64, string, error) {
+func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration) (float64, string, error) {
 	providerValue := application.dependencies.Scoring
 	if configured, err := application.configuredScoringProvider(ctx); err == nil {
 		providerValue = configured
@@ -529,15 +594,44 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		if err != nil {
 			return 0, addressFamily(exitIdentity), err
 		}
-		return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) { return provider.ScoreWithClient(ctx, exitIdentity, client) })
+		return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) {
+			if err := waitScoringJitter(ctx, jitter); err != nil {
+				return 0, err
+			}
+			return provider.ScoreWithClient(ctx, exitIdentity, client)
+		})
 	}
-	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) { return providerValue.Score(ctx, exitIdentity) })
+	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) {
+		if err := waitScoringJitter(ctx, jitter); err != nil {
+			return 0, err
+		}
+		return providerValue.Score(ctx, exitIdentity)
+	})
+}
+
+func waitScoringJitter(ctx context.Context, maximum time.Duration) error {
+	if maximum <= 0 {
+		return nil
+	}
+	delay := time.Duration(rand.Int63n(int64(maximum) + 1))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func medianLatency(values []time.Duration) time.Duration {
 	sorted := append([]time.Duration(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return sorted[len(sorted)/2]
+	middle := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[middle]
+	}
+	return sorted[middle-1] + (sorted[middle]-sorted[middle-1])/2
 }
 
 func (application *Application) scoreWithCache(ctx context.Context, exitIdentity string) (float64, string, error) {
@@ -546,6 +640,8 @@ func (application *Application) scoreWithCache(ctx context.Context, exitIdentity
 }
 
 func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, scoreProvider func() (float64, error)) (float64, string, error) {
+	application.scoreCacheMu.Lock()
+	defer application.scoreCacheMu.Unlock()
 	family := addressFamily(exitIdentity)
 	if family == "" {
 		return 0, "", errors.New("exit identity is not a valid IP address")
