@@ -389,6 +389,45 @@ func TestProxyNodeIdentitySurvivesARefreshThatOnlyRenamesTheNode(t *testing.T) {
 	}
 }
 
+func TestNamelessProxyNodeNamesSurviveAReorderedRefresh(t *testing.T) {
+	upstream := &configuredUpstream{document: []byte("proxies:\n  - type: ss\n    server: first.example\n    port: 443\n  - type: ss\n    server: second.example\n    port: 443\n")}
+	server := openApplicationServer(t, upstream)
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{
+		"name": "Anonymous", "kind": "url", "url": "https://anonymous.example/sub",
+	})
+	var subscription struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&subscription); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	initial := readProxyNodes(t, server.URL, subscription.ID)
+	namesByServer := map[string]string{}
+	idsByServer := map[string]string{}
+	for _, node := range initial {
+		serverName, _ := node.Config["server"].(string)
+		namesByServer[serverName] = node.Name
+		idsByServer[serverName] = node.ID
+	}
+
+	upstream.document = []byte("proxies:\n  - type: ss\n    server: second.example\n    port: 443\n  - type: ss\n    server: first.example\n    port: 443\n")
+	refreshResponse, err := http.Post(server.URL+"/api/upstream-subscriptions/"+subscription.ID+"/refresh", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refreshResponse.Body.Close()
+	if refreshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status=%d", refreshResponse.StatusCode)
+	}
+	for _, node := range readProxyNodes(t, server.URL, subscription.ID) {
+		serverName, _ := node.Config["server"].(string)
+		if node.ID != idsByServer[serverName] || node.Name != namesByServer[serverName] {
+			t.Fatalf("nameless Proxy Node identity changed after reorder: %+v", node)
+		}
+	}
+}
+
 type proxyNodeResponse struct {
 	ID           string         `json:"id"`
 	Fingerprint  string         `json:"fingerprint"`

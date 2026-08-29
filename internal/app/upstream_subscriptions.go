@@ -535,14 +535,14 @@ func (application *Application) replaceProxyNodes(ctx context.Context, subscript
 	}
 	occurrences := map[string]int{}
 	nodes := make([]storedProxyNode, 0, len(parsed.Proxies))
-	for index, config := range parsed.Proxies {
+	for _, config := range parsed.Proxies {
 		original, _ := config["name"].(string)
-		if strings.TrimSpace(original) == "" {
-			original = fmt.Sprintf("unnamed-%d", index+1)
-		}
 		fingerprint, err := normalizedNodeFingerprint(config)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(original) == "" {
+			original = "unnamed-" + shortFingerprint(fingerprint)
 		}
 		occurrences[fingerprint]++
 		id := stableProxyNodeID(subscriptionID, fingerprint, occurrences[fingerprint])
@@ -751,17 +751,21 @@ func proxyNodeDisplayNameBase(node storedProxyNode) string {
 }
 
 func proxyNodeCollisionSuffix(node storedProxyNode, fingerprintCount int) string {
-	suffix := node.Fingerprint
-	if len(suffix) > 8 {
-		suffix = suffix[:8]
-	}
+	suffix := shortFingerprint(node.Fingerprint)
 	if fingerprintCount > 1 {
-		suffix += "-" + shortStableID(node.SubscriptionID)
+		suffix += "-" + shortSubscriptionID(node.SubscriptionID)
 	}
 	return suffix
 }
 
-func shortStableID(value string) string {
+func shortFingerprint(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
+}
+
+func shortSubscriptionID(value string) string {
 	if len(value) <= 8 {
 		return value
 	}
