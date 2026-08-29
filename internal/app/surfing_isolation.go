@@ -77,7 +77,39 @@ func (inspector ProcSurfingRuntimeInspector) Inspect(ctx context.Context) (Surfi
 		}
 		return *candidate, nil
 	}
+	if listening, err := surfingDefaultPortListening(root); err != nil {
+		return SurfingRuntimeInspection{}, fmt.Errorf("inspect transparent-proxy listeners: %w", err)
+	} else if listening {
+		return SurfingRuntimeInspection{Detected: true, Mode: "unknown"}, nil
+	}
 	return SurfingRuntimeInspection{Mode: "inactive"}, nil
+}
+
+func surfingDefaultPortListening(procRoot string) (bool, error) {
+	if runtime.GOOS != "android" || procRoot != "/proc" {
+		return false, nil
+	}
+	for _, name := range []string{"tcp", "tcp6"} {
+		data, err := os.ReadFile(filepath.Join(procRoot, "net", name))
+		if err != nil {
+			return false, err
+		}
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[3] != "0A" {
+				continue
+			}
+			address := strings.Split(fields[1], ":")
+			if len(address) != 2 {
+				continue
+			}
+			port, err := strconv.ParseUint(address[1], 16, 16)
+			if err == nil && IsSurfingDefaultPort(int(port)) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (inspector ProcSurfingRuntimeInspector) tunInterfaceActive(procRoot string) (bool, error) {

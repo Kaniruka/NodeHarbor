@@ -616,6 +616,10 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
 		return
 	}
+	if err := runContext.Err(); err != nil {
+		application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor could not prove a safe Evaluation Run")
+		return
+	}
 	if reason, paused := application.isolationFailure(ctx); paused {
 		application.pauseEvaluationRun(ctx, id, reason)
 		return
@@ -633,7 +637,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	if passed > 0 {
 		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
 		application.beginEvaluationPhase(ctx, id, "publication")
-		if err := application.publishQualifiedNodes(ctx, id); err != nil {
+		if err := application.publishQualifiedNodes(runContext, id); err != nil {
 			application.setPublicationResult(ctx, id, "failed")
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
 			return
