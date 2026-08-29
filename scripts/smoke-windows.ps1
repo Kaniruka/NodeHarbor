@@ -12,7 +12,11 @@ foreach ($requiredFile in @($executable, $core, $notices)) {
         throw "Package file is missing: $requiredFile"
     }
 }
-$actualFiles = @(Get-ChildItem -LiteralPath $root -File | ForEach-Object { $_.Name } | Sort-Object)
+$actualDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Directory)
+if ($actualDirectories.Count -ne 0) {
+    throw "Package contains unexpected directories: $($actualDirectories.FullName -join ', ')"
+}
+$actualFiles = @(Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length).TrimStart('\') } | Sort-Object)
 if (@(Compare-Object $expectedFiles $actualFiles).Count -ne 0) {
     throw "Package contains unexpected or missing files: $($actualFiles -join ', ')"
 }
@@ -57,6 +61,24 @@ function Invoke-HTTP {
         $client.Dispose()
         $handler.Dispose()
     }
+}
+
+function Wait-For-HTTPStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [System.Diagnostics.Process]$Process,
+        [int]$ExpectedStatus = 200
+    )
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        if ($null -ne $Process -and $Process.HasExited) { throw "NodeHarbor exited while waiting for $Uri`: $($Process.ExitCode)" }
+        try {
+            $response = Invoke-HTTP $Uri
+            if ($response.Status -eq $ExpectedStatus) { return $response }
+        }
+        catch { }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Timed out waiting for HTTP $ExpectedStatus from $Uri"
 }
 
 $fakePort = Get-FreeTcpPort
@@ -121,12 +143,6 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $subscription -ScriptBlock {
     }
 }
 $process = $null
-$oldEnvironment = @{}
-$environment = @{
-    NODEHARBOR_TEST_IPLARK_ENDPOINT = "http://127.0.0.1:$fakePort/score"
-    NODEHARBOR_TEST_IPV4_IDENTITY_ENDPOINT = "http://127.0.0.1:$fakePort/identity"
-    NODEHARBOR_TEST_IPV6_IDENTITY_ENDPOINT = "http://127.0.0.1:$fakePort/identity-v6"
-}
 try {
     $fakeReady = $false
     for ($attempt = 0; $attempt -lt 50; $attempt++) {
@@ -142,28 +158,19 @@ try {
     }
     if (-not $fakeReady) { throw 'Deterministic fake server did not become ready' }
 
-    foreach ($name in $environment.Keys) {
-        $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
-    }
     $data = Join-Path $root 'smoke-data'
-    $process = Start-Process -FilePath $executable -ArgumentList @('--listen', "0.0.0.0:$appPort", '--data', $data, '--open-browser=false') -WorkingDirectory $root -PassThru -WindowStyle Hidden
+    $testArguments = @(
+        '--test-iplark-endpoint', "http://127.0.0.1:$fakePort/score",
+        '--test-ipv4-identity-endpoint', "http://127.0.0.1:$fakePort/identity",
+        '--test-ipv6-identity-endpoint', "http://127.0.0.1:$fakePort/identity-v6"
+    )
+    $process = Start-Process -FilePath $executable -ArgumentList (@('--listen', "0.0.0.0:$appPort", '--data', $data, '--open-browser=false') + $testArguments) -WorkingDirectory $root -PassThru -WindowStyle Hidden
 
     $baseURL = "http://127.0.0.1:$appPort"
-    $healthy = $false
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        if ($process.HasExited) { throw "NodeHarbor exited before becoming healthy: $($process.ExitCode)" }
-        try {
-            $health = Invoke-HTTP "$baseURL/api/health"
-            if ($health.Status -eq 200 -and (($health.Body | ConvertFrom-Json).status -eq 'healthy')) {
-                $healthy = $true
-                break
-            }
-        }
-        catch { }
-        Start-Sleep -Milliseconds 250
-    }
-    if (-not $healthy) { throw 'NodeHarbor did not become healthy' }
+    $health = Wait-For-HTTPStatus -Uri "$baseURL/api/health" -Process $process
+    if (($health.Body | ConvertFrom-Json).status -ne 'healthy') { throw 'NodeHarbor did not become healthy' }
+    $webUI = Wait-For-HTTPStatus -Uri "$baseURL/" -Process $process
+    if ($webUI.Body -notmatch '<div id="root"></div>') { throw 'Embedded WebUI smoke check failed' }
 
     $settings = @{
         scoringProvider = 'iplark'
@@ -205,25 +212,27 @@ try {
     }
     if ((Invoke-HTTP "$baseURL/api/settings").Status -ne 200) { throw 'loopback management access failed' }
 
-    $lanAddress = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' -and $_.IPAddress -notmatch '^169\.254\.' } | Select-Object -First 1 -ExpandProperty IPAddress
-    if ([string]::IsNullOrWhiteSpace($lanAddress)) { throw 'No non-loopback IPv4 address is available for LAN boundary smoke testing' }
-    $lanBaseURL = "http://$lanAddress`:$appPort"
-    if ((Invoke-HTTP "$lanBaseURL/sub/clash.yaml").Status -ne 200) { throw 'LAN Published Subscription access failed' }
-    if ((Invoke-HTTP "$lanBaseURL/api/settings").Status -ne 403) { throw 'LAN management access was not rejected' }
+    $lanAddresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' -and $_.IPAddress -notmatch '^169\.254\.' } | Select-Object -ExpandProperty IPAddress -Unique)
+    if ($lanAddresses.Count -eq 0) { throw 'No non-loopback IPv4 address is available for LAN boundary smoke testing' }
+    $lanCheckPassed = $false
+    foreach ($lanAddress in $lanAddresses) {
+        try {
+            $lanBaseURL = "http://$lanAddress`:$appPort"
+            $lanPublication = Invoke-HTTP "$lanBaseURL/sub/clash.yaml"
+            $lanManagement = Invoke-HTTP "$lanBaseURL/api/settings"
+            if ($lanPublication.Status -eq 200 -and $lanManagement.Status -eq 403) {
+                $lanCheckPassed = $true
+                break
+            }
+        }
+        catch { }
+    }
+    if (-not $lanCheckPassed) { throw "LAN boundary checks failed for all non-loopback addresses: $($lanAddresses -join ', ')" }
 
     Stop-Process -Id $process.Id -Force
     $process = $null
-    $process = Start-Process -FilePath $executable -ArgumentList @('--listen', "0.0.0.0:$appPort", '--data', $data, '--open-browser=false') -WorkingDirectory $root -PassThru -WindowStyle Hidden
-    $restarted = $false
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        if ($process.HasExited) { throw "NodeHarbor did not restart: $($process.ExitCode)" }
-        try {
-            if ((Invoke-HTTP "$baseURL/api/health").Status -eq 200) { $restarted = $true; break }
-        }
-        catch { }
-        Start-Sleep -Milliseconds 250
-    }
-    if (-not $restarted) { throw 'NodeHarbor did not become healthy after restart' }
+    $process = Start-Process -FilePath $executable -ArgumentList (@('--listen', "0.0.0.0:$appPort", '--data', $data, '--open-browser=false') + $testArguments) -WorkingDirectory $root -PassThru -WindowStyle Hidden
+    [void](Wait-For-HTTPStatus -Uri "$baseURL/api/health" -Process $process)
     $persistedSources = (Invoke-HTTP "$baseURL/api/upstream-subscriptions").Body | ConvertFrom-Json
     if (@($persistedSources).Count -ne 1 -or $persistedSources[0].name -ne 'Smoke Source') { throw 'Upstream Subscription state did not persist across restart' }
     $persistedPublication = Invoke-HTTP "$baseURL/sub/clash.yaml"
@@ -231,9 +240,6 @@ try {
 }
 finally {
     if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-    foreach ($name in $environment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
-    }
     if ($null -ne $fakeJob) {
         Stop-Job -Job $fakeJob -ErrorAction SilentlyContinue
         Remove-Job -Job $fakeJob -Force -ErrorAction SilentlyContinue

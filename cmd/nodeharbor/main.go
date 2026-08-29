@@ -32,6 +32,10 @@ func run() error {
 	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted listener address and port")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
+	testIPLarkEndpoint := flag.String("test-iplark-endpoint", "", "explicit deterministic smoke-test IPLark endpoint")
+	testIPCheckEndpoint := flag.String("test-ipcheck-endpoint", "", "explicit deterministic smoke-test IPCheck endpoint")
+	testIPv4IdentityEndpoint := flag.String("test-ipv4-identity-endpoint", "", "explicit deterministic smoke-test IPv4 Exit Identity endpoint")
+	testIPv6IdentityEndpoint := flag.String("test-ipv6-identity-endpoint", "", "explicit deterministic smoke-test IPv6 Exit Identity endpoint")
 	flag.Parse()
 
 	assets, err := webassets.Assets()
@@ -42,10 +46,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	kernel := app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)
+	dependencies := app.DefaultDependencies(kernel)
+	if *testIPLarkEndpoint != "" || *testIPCheckEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != "" {
+		dependencies = app.DefaultDependenciesWithTestEndpoints(kernel, app.TestEndpointConfig{
+			IPLarkEndpoint:       *testIPLarkEndpoint,
+			IPCheckEndpoint:      *testIPCheckEndpoint,
+			IPv4IdentityEndpoint: *testIPv4IdentityEndpoint,
+			IPv6IdentityEndpoint: *testIPv6IdentityEndpoint,
+		})
+	}
 	application, err := app.Open(context.Background(), app.Config{
 		DatabasePath: filepath.Join(*dataDirectory, "nodeharbor.db"),
 		WebAssets:    assets,
-	}, app.DefaultDependencies(app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)))
+	}, dependencies)
 	if err != nil {
 		return err
 	}

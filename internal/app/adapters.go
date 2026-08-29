@@ -17,13 +17,7 @@ import (
 
 func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
-	if endpoint := os.Getenv("NODEHARBOR_TEST_IPLARK_ENDPOINT"); endpoint != "" {
-		iplark.Endpoint = endpoint
-	}
 	ipcheck := NewIPCheckProvider(nil)
-	if endpoint := os.Getenv("NODEHARBOR_TEST_IPCHECK_ENDPOINT"); endpoint != "" {
-		ipcheck.Endpoint = endpoint
-	}
 	testChannel := TestChannel(UnavailableTestChannel{})
 	var isolation SurfingIsolationGuard
 	if mihomo, ok := kernel.(MihomoKernel); ok {
@@ -40,6 +34,47 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 		TestChannel:      testChannel,
 		Isolation:        isolation,
 	}
+}
+
+// TestEndpointConfig is an explicit opt-in configuration for deterministic
+// package smoke tests. Normal application assembly always uses the real
+// provider and Exit Identity endpoints.
+type TestEndpointConfig struct {
+	IPLarkEndpoint       string
+	IPCheckEndpoint      string
+	IPv4IdentityEndpoint string
+	IPv6IdentityEndpoint string
+}
+
+func DefaultDependenciesWithTestEndpoints(kernel Kernel, config TestEndpointConfig) Dependencies {
+	dependencies := DefaultDependencies(kernel)
+	if config.IPLarkEndpoint != "" {
+		if provider, ok := dependencies.ScoringProviders["iplark"].(IPLarkProvider); ok {
+			provider.Endpoint = config.IPLarkEndpoint
+			dependencies.ScoringProviders["iplark"] = provider
+			if _, ok := dependencies.Scoring.(IPLarkProvider); ok {
+				dependencies.Scoring = provider
+			}
+		}
+	}
+	if config.IPCheckEndpoint != "" {
+		if provider, ok := dependencies.ScoringProviders["ipcheck"].(IPCheckProvider); ok {
+			provider.Endpoint = config.IPCheckEndpoint
+			dependencies.ScoringProviders["ipcheck"] = provider
+		}
+	}
+	if channel, ok := dependencies.TestChannel.(*MihomoTestChannel); ok {
+		channel.ipv4IdentityEndpoint = endpointOrDefault(config.IPv4IdentityEndpoint, ipv4IdentityEndpoint)
+		channel.ipv6IdentityEndpoint = endpointOrDefault(config.IPv6IdentityEndpoint, ipv6IdentityEndpoint)
+	}
+	return dependencies
+}
+
+func endpointOrDefault(endpoint, fallback string) string {
+	if endpoint == "" {
+		return fallback
+	}
+	return endpoint
 }
 
 type UnavailableSurfingIsolation struct{}

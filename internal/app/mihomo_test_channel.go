@@ -50,14 +50,12 @@ type mihomoTestLease struct {
 }
 
 func NewMihomoTestChannel(executablePath string, build MihomoBuild) *MihomoTestChannel {
-	ipv4Endpoint := os.Getenv("NODEHARBOR_TEST_IPV4_IDENTITY_ENDPOINT")
-	if ipv4Endpoint == "" {
-		ipv4Endpoint = ipv4IdentityEndpoint
-	}
-	ipv6Endpoint := os.Getenv("NODEHARBOR_TEST_IPV6_IDENTITY_ENDPOINT")
-	if ipv6Endpoint == "" {
-		ipv6Endpoint = ipv6IdentityEndpoint
-	}
+	return NewMihomoTestChannelWithIdentityEndpoints(executablePath, build, ipv4IdentityEndpoint, ipv6IdentityEndpoint)
+}
+
+// NewMihomoTestChannelWithIdentityEndpoints creates a Test Channel with
+// explicit identity services for deterministic package smoke tests.
+func NewMihomoTestChannelWithIdentityEndpoints(executablePath string, build MihomoBuild, ipv4Endpoint, ipv6Endpoint string) *MihomoTestChannel {
 	return &MihomoTestChannel{
 		executablePath:       executablePath,
 		build:                build,
