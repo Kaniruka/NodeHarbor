@@ -13,11 +13,18 @@ nodeharbor_pid_is_owned() {
   [ -r "/proc/$pid/exe" ] || return 1
   [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$NODEHARBOR_BIN" ] || return 1
   [ -r "/proc/$pid/cmdline" ] || return 1
-  cmdline=$(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
-  case "$cmdline" in
-    *"--data $DATA_DIR"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  set -- $(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
+  [ "$1" = "$NODEHARBOR_BIN" ] || return 1
+  shift
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--data' ]; then
+      shift
+      [ "$1" = "$DATA_DIR" ] && return 0
+      return 1
+    fi
+    shift
+  done
+  return 1
 }
 
 nodeharbor_stop() {

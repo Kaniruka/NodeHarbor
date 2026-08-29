@@ -25,9 +25,7 @@ request_post() {
 was_running=0
 if nodeharbor_pid_is_owned "$(cat "$PID_FILE" 2>/dev/null)"; then was_running=1; fi
 nodeharbor_start || { echo 'NodeHarbor failed to start' >&2; exit 1; }
-if [ -n "${NODEHARBOR_SMOKE_URL:-}" ]; then
-  base_url="$NODEHARBOR_SMOKE_URL"
-elif [ -n "${NODEHARBOR_LISTEN:-}" ]; then
+if [ -n "${NODEHARBOR_LISTEN:-}" ]; then
   base_url="http://$NODEHARBOR_LISTEN"
 else
   base_url="http://127.0.0.1:9876"
@@ -68,9 +66,15 @@ settings_after=$(request "$base_url/api/settings") || { echo 'health endpoint fa
 installation_id_after=$(printf '%s' "$settings_after" | sed -n 's/.*"installationId":"\([^"]*\)".*/\1/p')
 [ "$installation_id_before" = "$installation_id_after" ] || { echo 'SQLite state did not persist across restart' >&2; exit 1; }
 
-nodeharbor_stop || { echo 'owned stop before foreign-process test failed' >&2; exit 1; }
+"$MODDIR/action.sh" stop || { echo 'owned stop before foreign-process test failed' >&2; exit 1; }
 sleep 60 &
 foreign_pid=$!
+printf '%s\n' "$foreign_pid" >"$PID_FILE"
+"$MODDIR/action.sh" stop || { echo 'stop lifecycle failed'; kill "$foreign_pid" 2>/dev/null || true; exit 1; }
+if ! kill -0 "$foreign_pid" 2>/dev/null; then
+  echo 'stop lifecycle terminated a foreign process' >&2
+  exit 1
+fi
 printf '%s\n' "$foreign_pid" >"$PID_FILE"
 "$MODDIR/uninstall.sh" || { echo 'uninstall lifecycle failed' >&2; kill "$foreign_pid" 2>/dev/null || true; exit 1; }
 if ! kill -0 "$foreign_pid" 2>/dev/null; then
