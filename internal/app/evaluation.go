@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -718,13 +719,36 @@ func (application *Application) configuredScoringProvider(ctx context.Context) (
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_provider'`).Scan(&name); err != nil {
 		return application.dependencies.Scoring, err
 	}
-	if provider, ok := application.dependencies.ScoringProviders[name]; ok {
-		return provider, nil
+	provider, ok := application.scoringProviderByName(name)
+	if !ok {
+		return nil, fmt.Errorf("Scoring Provider %q is not configured", name)
+	}
+	enabled, err := application.scoringProviderEnabled(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return nil, fmt.Errorf("Scoring Provider %q is disabled", name)
+	}
+	return provider, nil
+}
+
+func (application *Application) scoringProviderByName(name string) (ScoringProvider, bool) {
+	if provider, ok := application.dependencies.ScoringProviders[name]; ok && provider != nil {
+		return provider, true
 	}
 	if name == "iplark" && application.dependencies.Scoring != nil {
-		return application.dependencies.Scoring, nil
+		return application.dependencies.Scoring, true
 	}
-	return nil, fmt.Errorf("Scoring Provider %q is not configured", name)
+	return nil, false
+}
+
+func (application *Application) scoringProviderEnabled(ctx context.Context, name string) (bool, error) {
+	var value string
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_enabled").Scan(&value); err != nil {
+		return false, err
+	}
+	return value == "1" || strings.EqualFold(value, "true"), nil
 }
 
 func (application *Application) scoringThreshold(ctx context.Context, provider string) int {
@@ -760,8 +784,24 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		if err := waitScoringJitter(ctx, jitter); err != nil {
 			return 0, err
 		}
-		return provider.ScoreWithClient(ctx, exitIdentity, client)
+		score, err := provider.ScoreWithClient(ctx, exitIdentity, client)
+		if err != nil {
+			application.recordScoringProviderFailure(ctx, providerValue, err)
+			return 0, err
+		}
+		application.clearScoringProviderFailure(ctx, providerValue)
+		return score, nil
 	})
+}
+
+func (application *Application) recordScoringProviderFailure(ctx context.Context, provider ScoringProvider, err error) {
+	key := scoringProviderKey(provider) + "_failure"
+	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, err.Error(), key)
+}
+
+func (application *Application) clearScoringProviderFailure(ctx context.Context, provider ScoringProvider) {
+	key := scoringProviderKey(provider) + "_failure"
+	_, _ = application.database.ExecContext(ctx, `UPDATE settings SET value = '' WHERE key = ?`, key)
 }
 
 func waitScoringJitter(ctx context.Context, maximum time.Duration) error {

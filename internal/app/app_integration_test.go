@@ -515,6 +515,53 @@ func TestDefaultAssemblyUsesIPLarkThroughTheVerifiedTestChannel(t *testing.T) {
 	}
 }
 
+func TestIPCheckProviderUsesTheVerifiedTestChannel(t *testing.T) {
+	var requests int
+	channelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("ip") != "198.51.100.77" {
+			t.Errorf("channel fixture ip=%q", r.URL.Query().Get("ip"))
+		}
+		_, _ = w.Write([]byte(`{"score":88,"provider":"ipcheck-fixture"}`))
+	}))
+	defer channelServer.Close()
+
+	channel := &iplarkFixtureChannel{destination: channelServer.URL}
+	dependencies := app.DefaultDependencies(&nodeValidationKernel{})
+	provider, ok := dependencies.ScoringProviders["ipcheck"].(app.IPCheckProvider)
+	if !ok {
+		t.Fatalf("IPCheck provider=%T", dependencies.ScoringProviders["ipcheck"])
+	}
+	provider.Endpoint = channelServer.URL + "/score"
+	dependencies.ScoringProviders["ipcheck"] = provider
+	dependencies.Upstream = &recordingUpstream{document: []byte("proxies:\n  - name: ipcheck-production-assembly\n    type: ss\n    server: example.test\n    port: 443\n")}
+	dependencies.TestChannel = channel
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	server := httptest.NewServer(instance.Handler())
+	defer server.Close()
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{"scoringProvider": "ipcheck", "availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Results []struct {
+			State string   `json:"state"`
+			Score *float64 `json:"ipScore"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 || run.Results[0].State != "passed" || run.Results[0].Score == nil || *run.Results[0].Score != 88 || requests != 1 || channel.httpClientCalls != 1 {
+		t.Fatalf("run=%+v requests=%d channel clients=%d", run, requests, channel.httpClientCalls)
+	}
+}
+
 func TestEvaluationRejectsUnverifiedExitIdentityCandidate(t *testing.T) {
 	channel := &identityChannel{attempt: app.AvailabilityAttempt{
 		Success:        true,
@@ -621,6 +668,90 @@ func TestScoreCacheIsScopedToProviderAndExitIdentity(t *testing.T) {
 	runEvaluation(t, server.URL, map[string]any{})
 	if iplark.callCount() != 2 || ipcheck.callCount() != 1 {
 		t.Fatalf("provider cache reuse was not isolated: iplark=%d ipcheck=%d", iplark.callCount(), ipcheck.callCount())
+	}
+}
+
+func TestScoringProviderRegistryExposesIndependentEnabledAndFailureState(t *testing.T) {
+	iplark := &namedScoring{name: "iplark", score: 80}
+	ipcheck := &namedScoring{name: "ipcheck", score: 80}
+	server := openEvaluationApplicationWithProviders(t, &recordingUpstream{document: []byte("proxies: []\n")}, &nodeValidationKernel{}, &identityChannel{}, iplark, map[string]app.ScoringProvider{"iplark": iplark, "ipcheck": ipcheck})
+
+	var settings struct {
+		ScoringProviders []struct {
+			Name          string `json:"name"`
+			Enabled       bool   `json:"enabled"`
+			FailureStatus string `json:"failureStatus"`
+		} `json:"scoringProviders"`
+	}
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[0].Name != "iplark" || !settings.ScoringProviders[0].Enabled || settings.ScoringProviders[1].Name != "ipcheck" || !settings.ScoringProviders[1].Enabled || settings.ScoringProviders[1].FailureStatus != "" {
+		t.Fatalf("initial provider settings=%+v", settings.ScoringProviders)
+	}
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{"ipcheckEnabled": false})
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if settings.ScoringProviders[1].Enabled {
+		t.Fatalf("disabled IPCheck.ing was reported enabled: %+v", settings.ScoringProviders)
+	}
+}
+
+func TestScoringProviderFailureStatusDistinguishesOutageFromLowScore(t *testing.T) {
+	channel := &identityChannel{attempt: app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond, ExitIdentities: []app.ExitIdentityCandidate{{IP: "198.51.100.20", Verified: true}}}}
+	iplark := &namedScoring{name: "iplark", score: 80}
+	ipcheck := &namedScoring{name: "ipcheck", score: 80, err: errors.New("fixture provider outage")}
+	server := openEvaluationApplicationWithProviders(t, &recordingUpstream{document: []byte("proxies:\n  - name: provider-status\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, iplark, map[string]app.ScoringProvider{"iplark": iplark, "ipcheck": ipcheck})
+	putJSON(t, server.URL+"/api/settings", map[string]any{"scoringProvider": "ipcheck", "availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Results []struct {
+			Reason string `json:"reason"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 || !strings.HasPrefix(run.Results[0].Reason, "score_unavailable:") {
+		t.Fatalf("provider failure result=%+v", run.Results)
+	}
+	var settings struct {
+		ScoringProviders []struct {
+			Name          string `json:"name"`
+			FailureStatus string `json:"failureStatus"`
+		} `json:"scoringProviders"`
+	}
+	getJSON(t, server.URL+"/api/settings", &settings)
+	if len(settings.ScoringProviders) != 2 || settings.ScoringProviders[1].Name != "ipcheck" || settings.ScoringProviders[1].FailureStatus != "fixture provider outage" {
+		t.Fatalf("provider diagnostics=%+v", settings.ScoringProviders)
+	}
+
+}
+
+func TestSelectedScoringProviderUsesItsOwnThreshold(t *testing.T) {
+	channel := &identityChannel{attempt: app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond, ExitIdentities: []app.ExitIdentityCandidate{{IP: "198.51.100.21", Verified: true}}}}
+	iplark := &namedScoring{name: "iplark", score: 80}
+	ipcheck := &namedScoring{name: "ipcheck", score: 80}
+	server := openEvaluationApplicationWithProviders(t, &recordingUpstream{document: []byte("proxies:\n  - name: provider-threshold\n    type: ss\n    server: example.test\n    port: 443\n")}, &nodeValidationKernel{}, channel, iplark, map[string]app.ScoringProvider{"iplark": iplark, "ipcheck": ipcheck})
+	putJSON(t, server.URL+"/api/settings", map[string]any{"scoringProvider": "ipcheck", "iplarkThreshold": 10, "ipcheckThreshold": 90, "availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+	var run struct {
+		Results []struct {
+			State  string `json:"state"`
+			Reason string `json:"reason"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 || run.Results[0].State != "failed" || !strings.Contains(run.Results[0].Reason, "threshold 90") {
+		t.Fatalf("IPCheck.ing threshold result=%+v", run.Results)
+	}
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{"scoringProvider": "iplark"})
+	runEvaluation(t, server.URL, map[string]any{})
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if len(run.Results) != 1 || run.Results[0].State != "passed" {
+		t.Fatalf("IPLark threshold result=%+v", run.Results)
 	}
 }
 
@@ -1400,6 +1531,7 @@ type namedScoring struct {
 	name  string
 	score float64
 	calls int
+	err   error
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -1435,6 +1567,9 @@ func (scoring *namedScoring) Score(context.Context, string) (float64, error) {
 	scoring.mu.Lock()
 	defer scoring.mu.Unlock()
 	scoring.calls++
+	if scoring.err != nil {
+		return 0, scoring.err
+	}
 	return scoring.score, nil
 }
 

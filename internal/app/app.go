@@ -194,20 +194,27 @@ type healthResponse struct {
 }
 
 type settingsResponse struct {
-	Language                      string   `json:"language"`
-	InstallationID                string   `json:"installationId"`
-	ScoringProvider               string   `json:"scoringProvider"`
-	IPLarkThreshold               int      `json:"iplarkThreshold"`
-	IPCheckThreshold              int      `json:"ipcheckThreshold"`
-	EvaluationIntervalMinutes     int      `json:"evaluationIntervalMinutes"`
-	HistoryRetentionDays          int      `json:"historyRetentionDays"`
-	AvailabilityAttempts          int      `json:"availabilityAttempts"`
-	AvailabilityRequiredSuccesses int      `json:"availabilityRequiredSuccesses"`
-	AvailabilityTimeoutSecs       int      `json:"availabilityTimeoutSeconds"`
-	AvailabilityMaxLatencyMS      int      `json:"availabilityMaxLatencyMs"`
-	AvailabilityURLs              []string `json:"availabilityURLs"`
-	EvaluationWorkerCount         int      `json:"evaluationWorkerCount"`
-	ScoringJitterMS               int      `json:"scoringJitterMs"`
+	Language                      string                  `json:"language"`
+	InstallationID                string                  `json:"installationId"`
+	ScoringProvider               string                  `json:"scoringProvider"`
+	IPLarkThreshold               int                     `json:"iplarkThreshold"`
+	IPCheckThreshold              int                     `json:"ipcheckThreshold"`
+	EvaluationIntervalMinutes     int                     `json:"evaluationIntervalMinutes"`
+	HistoryRetentionDays          int                     `json:"historyRetentionDays"`
+	AvailabilityAttempts          int                     `json:"availabilityAttempts"`
+	AvailabilityRequiredSuccesses int                     `json:"availabilityRequiredSuccesses"`
+	AvailabilityTimeoutSecs       int                     `json:"availabilityTimeoutSeconds"`
+	AvailabilityMaxLatencyMS      int                     `json:"availabilityMaxLatencyMs"`
+	AvailabilityURLs              []string                `json:"availabilityURLs"`
+	EvaluationWorkerCount         int                     `json:"evaluationWorkerCount"`
+	ScoringJitterMS               int                     `json:"scoringJitterMs"`
+	ScoringProviders              []scoringProviderStatus `json:"scoringProviders"`
+}
+
+type scoringProviderStatus struct {
+	Name          string `json:"name"`
+	Enabled       bool   `json:"enabled"`
+	FailureStatus string `json:"failureStatus,omitempty"`
 }
 
 func Open(ctx context.Context, config Config, dependencies Dependencies) (*Application, error) {
@@ -273,6 +280,10 @@ func (application *Application) initialize(ctx context.Context) error {
 		"scoring_provider":                "iplark",
 		"iplark_threshold":                "70",
 		"ipcheck_threshold":               "70",
+		"iplark_enabled":                  "1",
+		"ipcheck_enabled":                 "1",
+		"iplark_failure":                  "",
+		"ipcheck_failure":                 "",
 		"evaluation_interval_minutes":     "360",
 		"history_retention_days":          "7",
 		"availability_attempts":           fmt.Sprint(DefaultAvailabilityAttempts),
@@ -375,6 +386,8 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		ScoringProvider               string    `json:"scoringProvider"`
 		IPLarkThreshold               *int      `json:"iplarkThreshold"`
 		IPCheckThreshold              *int      `json:"ipcheckThreshold"`
+		IPLarkEnabled                 *bool     `json:"iplarkEnabled"`
+		IPCheckEnabled                *bool     `json:"ipcheckEnabled"`
 		EvaluationIntervalMinutes     *int      `json:"evaluationIntervalMinutes"`
 		HistoryRetentionDays          *int      `json:"historyRetentionDays"`
 		AvailabilityAttempts          *int      `json:"availabilityAttempts"`
@@ -433,7 +446,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -481,6 +494,16 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 				return
 			}
 			stored = fmt.Sprint(*number)
+		}
+		if enabled, ok := value.(*bool); ok {
+			if enabled == nil {
+				continue
+			}
+			if *enabled {
+				stored = "1"
+			} else {
+				stored = "0"
+			}
 		}
 		if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = ?`, stored, name); err != nil {
 			writeError(response, http.StatusInternalServerError, err)
@@ -549,7 +572,31 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_jitter_ms'`).Scan(&result.ScoringJitterMS); err != nil {
 		return result, err
 	}
+	providerStatuses, err := application.readScoringProviderStatuses(ctx)
+	if err != nil {
+		return result, err
+	}
+	result.ScoringProviders = providerStatuses
 	return result, nil
+}
+
+func (application *Application) readScoringProviderStatuses(ctx context.Context) ([]scoringProviderStatus, error) {
+	providers := []scoringProviderStatus{
+		{Name: "iplark"},
+		{Name: "ipcheck"},
+	}
+	for index := range providers {
+		name := providers[index].Name
+		var enabled string
+		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_enabled").Scan(&enabled); err != nil {
+			return nil, err
+		}
+		providers[index].Enabled = enabled == "1" || strings.EqualFold(enabled, "true")
+		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, name+"_failure").Scan(&providers[index].FailureStatus); err != nil {
+			return nil, err
+		}
+	}
+	return providers, nil
 }
 
 func (application *Application) handlePublishedSubscription(response http.ResponseWriter, request *http.Request) {

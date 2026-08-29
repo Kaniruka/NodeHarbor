@@ -173,6 +173,47 @@ test("failed refresh shows a stale Upstream Subscription and its reason", async 
   expect(screen.getByText("fetch Upstream Subscription: connection timed out")).toBeInTheDocument();
 });
 
+test("scoring settings keep both provider thresholds and expose provider diagnostics", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings") && init?.method === "PUT") {
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        scoringProvider: "ipcheck",
+        iplarkThreshold: 61,
+        ipcheckThreshold: 73,
+      });
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith("/api/settings")) {
+      return Response.json({
+        language: "zh-CN",
+        installationId: "installation-1",
+        scoringProvider: "ipcheck",
+        iplarkThreshold: 61,
+        ipcheckThreshold: 73,
+        scoringProviders: [
+          { name: "iplark", enabled: true },
+          { name: "ipcheck", enabled: true, failureStatus: "IPCheck.ing score could not be parsed" },
+        ],
+      });
+    }
+    if (url.endsWith("/api/health")) {
+      return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
+    }
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+
+  render(<App />);
+  expect(await screen.findByLabelText("IPLark 合格阈值")).toHaveValue(61);
+  expect(screen.getByLabelText("IPCheck.ing 合格阈值")).toHaveValue(73);
+  expect(screen.getByText(/IPCheck\.ing score could not be parsed/)).toBeInTheDocument();
+  await userEvent.clear(screen.getByLabelText("IPCheck.ing 合格阈值"));
+  await userEvent.type(screen.getByLabelText("IPCheck.ing 合格阈值"), "73");
+  await userEvent.click(screen.getByRole("button", { name: "保存评分设置" }));
+});
+
 test("WebUI blocks an eleventh Upstream Subscription with a clear message", async () => {
   const sources = Array.from({ length: 10 }, (_, index) => ({
     id: `source-${index}`,
