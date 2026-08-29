@@ -242,6 +242,36 @@ test("History shows durable run diagnostics and links to configuration export", 
   expect(screen.getByRole("link", { name: "Export configuration JSON" })).toHaveAttribute("href", "/api/settings/export");
 });
 
+test("listener diagnostics show local and current Published Subscription entrypoints", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings") && init?.method === "PUT") {
+      expect(JSON.parse(String(init.body))).toMatchObject({ listenAddress: "0.0.0.0", listenPort: 19876 });
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith("/api/settings")) return Response.json({
+      language: "en", installationId: "installation-1", listenAddress: "0.0.0.0", listenPort: 19876,
+      localSubscriptionURL: "http://127.0.0.1:19876/sub/clash.yaml", subscriptionURL: "http://lan.example:19876/sub/clash.yaml",
+      scoringProvider: "iplark", iplarkThreshold: 70, ipcheckThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
+      scoreCacheTTLMinutes: 1440, availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5,
+      availabilityMaxLatencyMs: 1500, availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
+    });
+    if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
+    if (url.endsWith("/api/evaluation-runs")) return Response.json([]);
+    if (url.endsWith("/api/logs")) return Response.json([]);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([]);
+    throw new Error(`unexpected request: ${url}`);
+  });
+
+  render(<App />);
+  expect(await screen.findByText("Local subscription URL")).toBeInTheDocument();
+  expect(screen.getByText("http://127.0.0.1:19876/sub/clash.yaml")).toBeInTheDocument();
+  expect(screen.getByText("http://lan.example:19876/sub/clash.yaml")).toBeInTheDocument();
+  expect(screen.getByText(/0\.0\.0\.0:19876/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Save scoring settings" }));
+});
+
 test("WebUI blocks an eleventh Upstream Subscription with a clear message", async () => {
   const sources = Array.from({ length: 10 }, (_, index) => ({
     id: `source-${index}`,

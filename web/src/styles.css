@@ -204,6 +204,24 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.listenerDiagnostics {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.listenerDiagnostics span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.listenerDiagnostics small {
+  color: var(--muted);
+}
+
 .primaryButton {
   flex: 0 0 auto;
   border: 0;

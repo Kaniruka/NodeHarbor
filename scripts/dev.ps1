@@ -1,5 +1,5 @@
 param(
-    [string]$Listen = '127.0.0.1:9876',
+    [string]$Listen = '',
     [string]$Data = 'data'
 )
 
@@ -40,7 +40,9 @@ finally {
 Push-Location $projectRoot
 try {
     go build -o (Join-Path $binDirectory 'nodeharbor.exe') ./cmd/nodeharbor
-    & (Join-Path $binDirectory 'nodeharbor.exe') --listen $Listen --data $Data
+    $arguments = @('--data', $Data)
+    if ($Listen -ne '') { $arguments += @('--listen', $Listen) }
+    & (Join-Path $binDirectory 'nodeharbor.exe') @arguments
 }
 finally {
     Pop-Location

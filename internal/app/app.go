@@ -13,6 +13,7 @@ import (
 	"net/http"
 	urlpkg "net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -223,7 +224,10 @@ type settingsResponse struct {
 	EvaluationWorkerCount         int                     `json:"evaluationWorkerCount"`
 	ScoringJitterMS               int                     `json:"scoringJitterMs"`
 	ScoreCacheTTLMinutes          int                     `json:"scoreCacheTTLMinutes"`
+	ListenAddress                 string                  `json:"listenAddress"`
 	ListenPort                    int                     `json:"listenPort"`
+	LocalSubscriptionURL          string                  `json:"localSubscriptionURL"`
+	SubscriptionURL               string                  `json:"subscriptionURL"`
 	ScoringProviders              []scoringProviderStatus `json:"scoringProviders"`
 }
 
@@ -275,6 +279,22 @@ func (application *Application) ListenPort(ctx context.Context) (int, error) {
 	return settings.ListenPort, nil
 }
 
+func (application *Application) ListenAddress(ctx context.Context) (string, error) {
+	settings, err := application.readSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	return settings.ListenAddress, nil
+}
+
+func (application *Application) ListenEndpoint(ctx context.Context) (string, error) {
+	settings, err := application.readSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(settings.ListenAddress, strconv.Itoa(settings.ListenPort)), nil
+}
+
 func (application *Application) Close() error {
 	if application.stopScheduler != nil {
 		application.stopScheduler()
@@ -322,6 +342,7 @@ func (application *Application) initialize(ctx context.Context) error {
 		"evaluation_worker_count":         fmt.Sprint(DefaultEvaluationWorkerCount),
 		"scoring_jitter_ms":               fmt.Sprint(int(DefaultScoringJitter / time.Millisecond)),
 		"score_cache_ttl_minutes":         "1440",
+		"listen_address":                  "127.0.0.1",
 		"listen_port":                     "9876",
 	} {
 		if _, err := application.database.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)`, key, value); err != nil {
@@ -409,6 +430,7 @@ func (application *Application) handleGetSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	settings.SubscriptionURL = requestPublishedSubscriptionURL(request, settings)
 	writeJSON(response, http.StatusOK, settings)
 }
 
@@ -430,6 +452,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		EvaluationWorkerCount         *int      `json:"evaluationWorkerCount"`
 		ScoringJitterMS               *int      `json:"scoringJitterMs"`
 		ScoreCacheTTLMinutes          *int      `json:"scoreCacheTTLMinutes"`
+		ListenAddress                 *string   `json:"listenAddress"`
 		ListenPort                    *int      `json:"listenPort"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
@@ -461,6 +484,17 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			}
 		}
 	}
+	if input.ListenAddress != nil {
+		address := strings.TrimSpace(*input.ListenAddress)
+		if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
+			address = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
+		}
+		if address == "" || strings.ContainsAny(address, "/?#") || strings.ContainsAny(address, " \t\r\n") || (net.ParseIP(address) == nil && strings.Contains(address, ":")) {
+			writeError(response, http.StatusBadRequest, errors.New("listen address must be a valid host or IP address"))
+			return
+		}
+		input.ListenAddress = &address
+	}
 	attempts, required := DefaultAvailabilityAttempts, DefaultAvailabilityRequiredSuccesses
 	if err := application.database.QueryRowContext(request.Context(), `SELECT value FROM settings WHERE key = 'availability_attempts'`).Scan(&attempts); err != nil {
 		writeError(response, http.StatusInternalServerError, err)
@@ -480,7 +514,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_port": input.ListenPort} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipcheck_threshold": input.IPCheckThreshold, "iplark_enabled": input.IPLarkEnabled, "ipcheck_enabled": input.IPCheckEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_address": input.ListenAddress, "listen_port": input.ListenPort} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -546,6 +580,12 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			} else {
 				stored = "0"
 			}
+		}
+		if address, ok := value.(*string); ok {
+			if address == nil {
+				continue
+			}
+			stored = strings.TrimSpace(*address)
 		}
 		if _, err := application.database.ExecContext(request.Context(), `UPDATE settings SET value = ? WHERE key = ?`, stored, name); err != nil {
 			writeError(response, http.StatusInternalServerError, err)
@@ -621,9 +661,13 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'score_cache_ttl_minutes'`).Scan(&result.ScoreCacheTTLMinutes); err != nil {
 		return result, err
 	}
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'listen_address'`).Scan(&result.ListenAddress); err != nil {
+		return result, err
+	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'listen_port'`).Scan(&result.ListenPort); err != nil {
 		return result, err
 	}
+	result.LocalSubscriptionURL = publishedSubscriptionURL("127.0.0.1", result.ListenPort)
 	providerStatuses, err := application.readScoringProviderStatuses(ctx)
 	if err != nil {
 		return result, err
@@ -661,6 +705,21 @@ func (application *Application) handlePublishedSubscription(response http.Respon
 	response.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store")
 	_, _ = response.Write(document)
+}
+
+func publishedSubscriptionURL(host string, port int) string {
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/sub/clash.yaml"
+}
+
+func requestPublishedSubscriptionURL(request *http.Request, settings settingsResponse) string {
+	if request.Host == "" {
+		return publishedSubscriptionURL(settings.ListenAddress, settings.ListenPort)
+	}
+	host := request.Host
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(settings.ListenPort))
+	}
+	return "http://" + host + "/sub/clash.yaml"
 }
 
 func loopbackManagementOnly(next http.Handler) http.Handler {

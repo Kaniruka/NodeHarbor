@@ -16,11 +16,19 @@ Requirements: Go 1.24 or newer and Node.js 24 or newer.
 
 The script downloads the pinned Mihomo v1.19.30 Windows build on first run, verifies both archive and executable SHA-256 digests on every startup, builds NodeHarbor beside its owned core, and opens <http://127.0.0.1:9876> in the default browser. The Android arm64-v8 package uses its separately pinned Mihomo asset and digest. The initial subscription is available at <http://127.0.0.1:9876/sub/clash.yaml>, including when there are no Proxy Nodes. Runtime state is stored under `data/` by default.
 
+The default listener is `127.0.0.1:9876`. To make only the Published Subscription and health reachable from a trusted LAN, bind the listener to a reachable address such as `0.0.0.0`; management routes still reject non-loopback clients:
+
+```powershell
+.\scripts\dev.ps1 -Listen 0.0.0.0:9876
+```
+
 To use a different address or state directory:
 
 ```powershell
 .\scripts\dev.ps1 -Listen 127.0.0.1:9988 -Data C:\NodeHarborData
 ```
+
+The listener address and port can also be saved in the WebUI. They are persisted in SQLite and take effect after the next restart. The WebUI shows the local subscription URL, the current access URL, and listener diagnostics. A bind conflict is reported at startup and does not replace the last Publication Snapshot.
 
 ## Verify
 

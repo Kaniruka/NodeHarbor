@@ -329,7 +329,7 @@ func TestNonLoopbackCanReadOnlyHealthAndPublication(t *testing.T) {
 	for _, path := range []struct {
 		path   string
 		status int
-	}{{"/api/health", http.StatusOK}, {"/sub/clash.yaml", http.StatusOK}, {"/api/settings", http.StatusForbidden}, {"/", http.StatusForbidden}} {
+	}{{"/api/health", http.StatusOK}, {"/sub/clash.yaml", http.StatusOK}, {"/api/settings", http.StatusForbidden}, {"/api/settings/export", http.StatusForbidden}, {"/api/logs", http.StatusForbidden}, {"/api/upstream-subscriptions", http.StatusForbidden}, {"/api/evaluation-runs", http.StatusForbidden}, {"/", http.StatusForbidden}} {
 		request := httptest.NewRequest(http.MethodGet, "http://nodeharbor"+path.path, nil)
 		request.RemoteAddr = "192.0.2.10:4000"
 		response := httptest.NewRecorder()
@@ -337,6 +337,70 @@ func TestNonLoopbackCanReadOnlyHealthAndPublication(t *testing.T) {
 		if response.Code != path.status {
 			t.Fatalf("%s status=%d want=%d", path.path, response.Code, path.status)
 		}
+	}
+}
+
+func TestListenerSettingsPersistAndExposeSubscriptionEntrypoints(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
+	first := openTestApplication(t, databasePath, &recordingKernel{})
+	firstServer := httptest.NewServer(first.Handler())
+
+	var initial struct {
+		ListenAddress        string `json:"listenAddress"`
+		ListenPort           int    `json:"listenPort"`
+		LocalSubscriptionURL string `json:"localSubscriptionURL"`
+		SubscriptionURL      string `json:"subscriptionURL"`
+	}
+	getJSON(t, firstServer.URL+"/api/settings", &initial)
+	if initial.ListenAddress != "127.0.0.1" || initial.ListenPort != 9876 {
+		t.Fatalf("default listener = %+v", initial)
+	}
+	if initial.LocalSubscriptionURL != "http://127.0.0.1:9876/sub/clash.yaml" || initial.SubscriptionURL == "" {
+		t.Fatalf("default subscription URLs = %+v", initial)
+	}
+
+	putJSON(t, firstServer.URL+"/api/settings", map[string]any{"listenAddress": "192.0.2.44", "listenPort": 19876})
+	firstServer.Close()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openTestApplication(t, databasePath, &recordingKernel{})
+	secondServer := httptest.NewServer(second.Handler())
+	t.Cleanup(secondServer.Close)
+	t.Cleanup(func() { _ = second.Close() })
+	var persisted struct {
+		ListenAddress        string `json:"listenAddress"`
+		ListenPort           int    `json:"listenPort"`
+		LocalSubscriptionURL string `json:"localSubscriptionURL"`
+	}
+	getJSON(t, secondServer.URL+"/api/settings", &persisted)
+	if persisted.ListenAddress != "192.0.2.44" || persisted.ListenPort != 19876 || persisted.LocalSubscriptionURL != "http://127.0.0.1:19876/sub/clash.yaml" {
+		t.Fatalf("persisted listener = %+v", persisted)
+	}
+}
+
+func TestPersistedListenerEndpointUsesAddressAndPort(t *testing.T) {
+	instance := openTestApplication(t, filepath.Join(t.TempDir(), "nodeharbor.db"), &recordingKernel{})
+	t.Cleanup(func() { _ = instance.Close() })
+
+	endpoint, err := instance.ListenEndpoint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "127.0.0.1:9876" {
+		t.Fatalf("default listener endpoint = %q", endpoint)
+	}
+
+	server := httptest.NewServer(instance.Handler())
+	putJSON(t, server.URL+"/api/settings", map[string]any{"listenAddress": "0.0.0.0", "listenPort": 19876})
+	server.Close()
+	endpoint, err = instance.ListenEndpoint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "0.0.0.0:19876" {
+		t.Fatalf("configured listener endpoint = %q", endpoint)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -28,7 +29,7 @@ func main() {
 }
 
 func run() error {
-	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted management port on loopback")
+	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted listener address and port")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	flag.Parse()
@@ -50,11 +51,11 @@ func run() error {
 	}
 	defer application.Close()
 	if *listenAddress == "" {
-		port, err := application.ListenPort(context.Background())
+		endpoint, err := application.ListenEndpoint(context.Background())
 		if err != nil {
-			return fmt.Errorf("read configured listen port: %w", err)
+			return fmt.Errorf("read configured listener: %w", err)
 		}
-		*listenAddress = fmt.Sprintf("127.0.0.1:%d", port)
+		*listenAddress = endpoint
 	}
 
 	server := &http.Server{
@@ -76,17 +77,66 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen for HTTP: %w", err)
 	}
+	listeners := []net.Listener{listener}
+	if requiresLoopbackListener(listener) {
+		localListener, localErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", listenerPort(listener)))
+		if localErr != nil {
+			_ = listener.Close()
+			return fmt.Errorf("listen for loopback management: %w", localErr)
+		}
+		listeners = append(listeners, localListener)
+	}
 	managementURL := "http://" + listener.Addr().String()
-	log.Printf("NodeHarbor is available at %s", managementURL)
+	if len(listeners) > 1 || listenerIsWildcard(listener) {
+		managementURL = "http://127.0.0.1:" + listenerPort(listener)
+	}
+	log.Printf("NodeHarbor listener is available at %s", "http://"+listener.Addr().String())
+	log.Printf("Management UI is available at %s; Published Subscription is available at %s/sub/clash.yaml", managementURL, "http://"+listener.Addr().String())
 	if *launchBrowser {
 		if err := openBrowser(managementURL); err != nil {
 			log.Printf("could not open the browser: %v", err)
 		}
 	}
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve HTTP: %w", err)
+	serveErrors := make(chan error, len(listeners))
+	for _, currentListener := range listeners {
+		go func() {
+			serveErrors <- server.Serve(currentListener)
+		}()
+	}
+	var serveErr error
+	for range listeners {
+		if currentErr := <-serveErrors; currentErr != nil && !errors.Is(currentErr, http.ErrServerClosed) && serveErr == nil {
+			serveErr = currentErr
+			_ = server.Close()
+		}
+	}
+	if serveErr != nil {
+		return fmt.Errorf("serve HTTP: %w", serveErr)
 	}
 	return nil
+}
+
+func requiresLoopbackListener(listener net.Listener) bool {
+	return !listenerIsLoopback(listener) && !listenerIsWildcard(listener)
+}
+
+func listenerIsLoopback(listener net.Listener) bool {
+	address, ok := listener.Addr().(*net.TCPAddr)
+	return ok && address.IP.IsLoopback()
+}
+
+func listenerIsWildcard(listener net.Listener) bool {
+	address, ok := listener.Addr().(*net.TCPAddr)
+	return ok && address.IP.IsUnspecified()
+}
+
+func listenerPort(listener net.Listener) string {
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_, port, _ := net.SplitHostPort(listener.Addr().String())
+		return port
+	}
+	return strconv.Itoa(address.Port)
 }
 
 func defaultMihomoPath() string {

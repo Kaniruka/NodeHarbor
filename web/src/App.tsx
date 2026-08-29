@@ -12,6 +12,13 @@ type Health = {
   publishedSubscription: { status: HealthState };
 };
 
+type ListenerSettings = {
+  listenAddress?: string;
+  listenPort?: number;
+  localSubscriptionURL?: string;
+  subscriptionURL?: string;
+};
+
 const messages = {
   "zh-CN": {
     eyebrow: "本地代理订阅管家",
@@ -27,6 +34,10 @@ const messages = {
     loading: "检查中",
     subscription: "订阅地址",
     subscriptionHint: "即使尚无代理节点，该地址也始终提供有效配置。",
+    localSubscription: "本地订阅地址",
+    currentSubscription: "当前访问入口",
+    listener: "监听诊断",
+    listenerHint: "管理路由仅接受回环请求；Published Subscription 可按监听地址提供给可信局域网。",
     copy: "复制地址",
     copied: "已复制",
     language: "语言",
@@ -78,6 +89,8 @@ const messages = {
     logs: "日志与诊断",
     cacheTTL: "评分缓存期限（分钟）",
     listenPort: "管理端口",
+    listenAddress: "监听地址",
+    restartRequired: "监听配置将在 NodeHarbor 重启后生效。",
   },
   en: {
     eyebrow: "Local proxy subscription curator",
@@ -93,6 +106,10 @@ const messages = {
     loading: "Checking",
     subscription: "Subscription URL",
     subscriptionHint: "This address always serves a valid configuration, even with no Proxy Nodes.",
+    localSubscription: "Local subscription URL",
+    currentSubscription: "Current access URL",
+    listener: "Listener diagnostics",
+    listenerHint: "Management routes accept loopback requests only; the Published Subscription follows the configured listener address.",
     copy: "Copy URL",
     copied: "Copied",
     language: "Language",
@@ -144,6 +161,8 @@ const messages = {
     logs: "Logs and diagnostics",
     cacheTTL: "Score cache TTL (minutes)",
     listenPort: "Management port",
+    listenAddress: "Listen address",
+    restartRequired: "Listener changes take effect after restarting NodeHarbor.",
   },
 } as const;
 
@@ -157,6 +176,7 @@ const initialHealth: Health = {
 export default function App() {
   const [locale, setLocale] = useState<Locale>(browserLocale());
   const [health, setHealth] = useState<Health>(initialHealth);
+  const [listener, setListener] = useState<ListenerSettings | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const text = messages[locale];
@@ -170,6 +190,7 @@ export default function App() {
       .then(([settings, currentHealth]) => {
         if (!active) return;
         setLocale(settings.language === "en" || settings.language === "zh-CN" ? settings.language : browserLocale());
+        setListener(settings);
         setHealth(currentHealth);
       })
       .catch(() => {
@@ -203,7 +224,7 @@ export default function App() {
   }
 
   async function copySubscriptionURL() {
-    await navigator.clipboard.writeText(subscriptionURL());
+    await navigator.clipboard.writeText(listener?.subscriptionURL || subscriptionURL());
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   }
@@ -254,7 +275,15 @@ export default function App() {
         <div>
           <h2 id="subscription-heading">{text.subscription}</h2>
           <p>{text.subscriptionHint}</p>
-          <code>{subscriptionURL()}</code>
+          <div className="listenerDiagnostics">
+            <span>{text.localSubscription}</span>
+            <code>{listener?.localSubscriptionURL || subscriptionURL()}</code>
+            <span>{text.currentSubscription}</span>
+            <code>{listener?.subscriptionURL || subscriptionURL()}</code>
+            <small>{text.listener}: {listener?.listenAddress && listener.listenPort ? `${listener.listenAddress}:${listener.listenPort}` : "—"}</small>
+            <small>{text.listenerHint}</small>
+            <small>{text.restartRequired}</small>
+          </div>
         </div>
         <button className="primaryButton" type="button" onClick={copySubscriptionURL}>
           {copied ? text.copied : text.copy}
@@ -286,6 +315,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
   const [workers, setWorkers] = useState(3);
   const [scoringJitter, setScoringJitter] = useState(100);
   const [cacheTTL, setCacheTTL] = useState(1440);
+  const [listenAddress, setListenAddress] = useState("127.0.0.1");
   const [listenPort, setListenPort] = useState(9876);
   useEffect(() => {
     let active = true;
@@ -294,13 +324,13 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     const timer = window.setInterval(load, 1000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
-  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { const selectedProvider: ProviderName = settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"; setProvider(selectedProvider); setThresholds({ iplark: typeof settings.iplarkThreshold === "number" ? settings.iplarkThreshold : 70, ipcheck: typeof settings.ipcheckThreshold === "number" ? settings.ipcheckThreshold : 70 }); setProviderStatuses(Array.isArray(settings.scoringProviders) ? settings.scoringProviders : []); setInterval(typeof settings.evaluationIntervalMinutes === "number" ? settings.evaluationIntervalMinutes : 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); setCacheTTL(settings.scoreCacheTTLMinutes || 1440); setListenPort(settings.listenPort || 9876); }).catch(() => undefined); }, []);
+  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { const selectedProvider: ProviderName = settings.scoringProvider === "ipcheck" ? "ipcheck" : "iplark"; setProvider(selectedProvider); setThresholds({ iplark: typeof settings.iplarkThreshold === "number" ? settings.iplarkThreshold : 70, ipcheck: typeof settings.ipcheckThreshold === "number" ? settings.ipcheckThreshold : 70 }); setProviderStatuses(Array.isArray(settings.scoringProviders) ? settings.scoringProviders : []); setInterval(typeof settings.evaluationIntervalMinutes === "number" ? settings.evaluationIntervalMinutes : 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); setCacheTTL(settings.scoreCacheTTLMinutes || 1440); setListenAddress(typeof settings.listenAddress === "string" ? settings.listenAddress : "127.0.0.1"); setListenPort(settings.listenPort || 9876); }).catch(() => undefined); }, []);
   async function start() {
     setBusy(true);
     try { const response = await fetch("/api/evaluation-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ignoreCache }) }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
   }
   async function saveScoringSettings() {
-    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, iplarkThreshold: thresholds.iplark, ipcheckThreshold: thresholds.ipcheck, evaluationIntervalMinutes: interval, historyRetentionDays: retention, scoreCacheTTLMinutes: cacheTTL, listenPort }) }).then(requireOK);
+    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, iplarkThreshold: thresholds.iplark, ipcheckThreshold: thresholds.ipcheck, evaluationIntervalMinutes: interval, historyRetentionDays: retention, scoreCacheTTLMinutes: cacheTTL, listenAddress, listenPort }) }).then(requireOK);
   }
   async function saveAvailabilitySettings() {
     await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availabilityAttempts: attempts, availabilityRequiredSuccesses: requiredSuccesses, availabilityTimeoutSeconds: timeoutSeconds, availabilityMaxLatencyMs: maxLatency, availabilityURLs: availabilityURLs.split(",").map((value) => value.trim()).filter(Boolean), evaluationWorkerCount: workers, scoringJitterMs: scoringJitter }) }).then(requireOK);
@@ -310,7 +340,7 @@ function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText 
     <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
     <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} onChange={(event) => setProvider(event.target.value as ProviderName)}><option value="iplark">{text.iplark}</option><option value="ipcheck">{text.ipcheck}</option></select></label><label><span>{text.iplarkThreshold}</span><input type="number" min="0" max="100" value={thresholds.iplark} onChange={(event) => setThresholds((current) => ({ ...current, iplark: Number(event.target.value) }))} /></label><label><span>{text.ipcheckThreshold}</span><input type="number" min="0" max="100" value={thresholds.ipcheck} onChange={(event) => setThresholds((current) => ({ ...current, ipcheck: Number(event.target.value) }))} /></label><label><input type="checkbox" checked={ignoreCache} onChange={(event) => setIgnoreCache(event.target.checked)} />{text.ignoreCache}</label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
     {providerStatuses.length > 0 && <div className="providerStatuses" aria-label={text.provider}><strong>{text.provider}</strong>{providerStatuses.map((status) => <small key={status.name}>{status.name === "ipcheck" ? text.ipcheck : text.iplark}: {status.enabled ? (status.failureStatus ? text.providerUnavailable : text.providerReady) : text.providerDisabled}{status.failureStatus ? ` · ${status.failureStatus}` : ""}</small>)}</div>}
-     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label><label><span>{text.cacheTTL}</span><input type="number" min="1" value={cacheTTL} onChange={(event) => setCacheTTL(Number(event.target.value))} /></label><label><span>{text.listenPort}</span><input type="number" min="1024" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /></label></div>
+     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label><label><span>{text.cacheTTL}</span><input type="number" min="1" value={cacheTTL} onChange={(event) => setCacheTTL(Number(event.target.value))} /></label><label><span>{text.listenAddress}</span><input type="text" value={listenAddress} onChange={(event) => setListenAddress(event.target.value)} /></label><label><span>{text.listenPort}</span><input type="number" min="1024" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /></label></div>
      <div className="evaluationSettings"><label><span>{text.availabilityAttempts}</span><input type="number" min="1" max="10" value={attempts} onChange={(event) => setAttempts(Number(event.target.value))} /></label><label><span>{text.availabilityRequired}</span><input type="number" min="1" max="10" value={requiredSuccesses} onChange={(event) => setRequiredSuccesses(Number(event.target.value))} /></label><label><span>{text.availabilityTimeout}</span><input type="number" min="1" max="300" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label></div>
      <div className="evaluationSettings"><label><span>{text.availabilityMaxLatency}</span><input type="number" min="1" max="60000" value={maxLatency} onChange={(event) => setMaxLatency(Number(event.target.value))} /></label><label><span>{text.availabilityURLs}</span><input type="text" value={availabilityURLs} onChange={(event) => setAvailabilityURLs(event.target.value)} /></label><label><span>{text.evaluationWorkers}</span><input type="number" min="1" max="3" value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></label><label><span>{text.scoringJitter}</span><input type="number" min="0" max="1000" value={scoringJitter} onChange={(event) => setScoringJitter(Number(event.target.value))} /></label><button type="button" onClick={saveAvailabilitySettings}>{text.saveAvailabilitySettings}</button></div>
      {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
