@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -177,7 +179,17 @@ func (application *Application) handleListEvaluationRuns(w http.ResponseWriter, 
 }
 
 func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, r *http.Request) {
-	run, accepted, err := application.startEvaluationRun(r.Context())
+	var input struct {
+		IgnoreCache bool `json:"ignoreCache"`
+	}
+	if r.Body != nil {
+		err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input)
+		if err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, errors.New("invalid evaluation run request"))
+			return
+		}
+	}
+	run, accepted, err := application.startEvaluationRun(r.Context(), input.IgnoreCache)
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -186,11 +198,12 @@ func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, 
 	_ = accepted
 }
 
-func (application *Application) startEvaluationRun(ctx context.Context) (evaluationRunResponse, bool, error) {
+func (application *Application) startEvaluationRun(ctx context.Context, ignoreCache bool) (evaluationRunResponse, bool, error) {
 	application.evaluationMu.Lock()
 	if application.runID != "" {
 		id := application.runID
 		application.pendingRun = true
+		application.pendingIgnoreCache = application.pendingIgnoreCache || ignoreCache
 		application.evaluationMu.Unlock()
 		run, err := application.readEvaluationRun(ctx, id)
 		return run, false, err
@@ -207,7 +220,7 @@ func (application *Application) startEvaluationRun(ctx context.Context) (evaluat
 	}
 	application.runID = id
 	application.evaluationMu.Unlock()
-	go application.executeEvaluationRun(context.Background(), id)
+	go application.executeEvaluationRun(context.Background(), id, ignoreCache)
 	run, err := application.readEvaluationRun(ctx, id)
 	return run, true, err
 }
@@ -275,12 +288,14 @@ func (application *Application) runResponse(ctx context.Context, run evaluationR
 	return result
 }
 
-func (application *Application) executeEvaluationRun(ctx context.Context, id string) {
+func (application *Application) executeEvaluationRun(ctx context.Context, id string, ignoreCache bool) {
 	defer func() {
 		application.cleanupEvaluationHistory(ctx)
 		application.evaluationMu.Lock()
 		pending := application.pendingRun
+		pendingIgnoreCache := application.pendingIgnoreCache
 		application.pendingRun = false
+		application.pendingIgnoreCache = false
 		if pending {
 			nextID, err := randomID()
 			if err == nil {
@@ -288,7 +303,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, nextID, now); err == nil {
 					application.runID = nextID
 					application.evaluationMu.Unlock()
-					go application.executeEvaluationRun(context.Background(), nextID)
+					go application.executeEvaluationRun(context.Background(), nextID, pendingIgnoreCache)
 					return
 				}
 			}
@@ -329,7 +344,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		go func() {
 			defer workers.Done()
 			for node := range jobs {
-				results <- application.evaluateNode(ctx, node, availability)
+				results <- application.evaluateNode(ctx, node, availability, ignoreCache)
 			}
 		}()
 	}
@@ -383,7 +398,7 @@ func (application *Application) runScheduler() {
 			timer.Stop()
 			return
 		case <-timer.C:
-			_, _, _ = application.startEvaluationRun(application.lifecycleCtx)
+			_, _, _ = application.startEvaluationRun(application.lifecycleCtx, false)
 		}
 	}
 }
@@ -477,7 +492,7 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 	return result, rows.Err()
 }
 
-func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig) evaluationNodeResult {
+func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool) evaluationNodeResult {
 	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
@@ -485,6 +500,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		return result
 	}
 	latencies := make([]time.Duration, 0, config.attempts)
+	identities := make([]ExitIdentityCandidate, 0)
 	for attempt := 0; attempt < config.attempts; attempt++ {
 		result.Attempts++
 		var lastErr error
@@ -509,7 +525,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 				cancel()
 				latencies = append(latencies, probe.Latency)
 				result.Successful++
-				result.ExitIdentity = probe.ExitIdentity
+				identities = append(identities, exitIdentityCandidates(probe)...)
 				break
 			}
 		}
@@ -531,11 +547,18 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		result.Reason = fmt.Sprintf("latency_exceeded: median latency is above %.0fms", config.maxLatency.Seconds()*1000)
 		return result
 	}
+	selectedIdentity, family, identityErr := selectExitIdentity(identities)
+	if identityErr != nil {
+		result.Reason = identityErr.Error()
+		return result
+	}
+	result.ExitIdentity = selectedIdentity
+	result.AddressFamily = family
 	if result.ExitIdentity == "" {
 		result.Reason = "no_exit_identity: Test Channel returned no exit identity"
 		return result
 	}
-	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter)
+	score, family, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, ignoreCache)
 	result.AddressFamily = family
 	if err != nil {
 		result.Reason = "score_unavailable: " + err.Error()
@@ -552,6 +575,40 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	}
 	result.State = "passed"
 	return result
+}
+
+func exitIdentityCandidates(attempt AvailabilityAttempt) []ExitIdentityCandidate {
+	if len(attempt.ExitIdentities) > 0 {
+		return append([]ExitIdentityCandidate(nil), attempt.ExitIdentities...)
+	}
+	if attempt.ExitIdentity == "" {
+		return nil
+	}
+	return []ExitIdentityCandidate{{IP: attempt.ExitIdentity, Verified: attempt.Verified}}
+}
+
+func selectExitIdentity(candidates []ExitIdentityCandidate) (string, string, error) {
+	if len(candidates) == 0 {
+		return "", "", nil
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.IP == "" || seen[candidate.IP] {
+			continue
+		}
+		seen[candidate.IP] = true
+		if !candidate.Verified {
+			return "", "", errors.New("test_channel_unverified: exit identity ownership could not be proven")
+		}
+	}
+	for _, preferredFamily := range []string{"ipv4", "ipv6"} {
+		for _, candidate := range candidates {
+			if candidate.Verified && addressFamily(candidate.IP) == preferredFamily {
+				return candidate.IP, preferredFamily, nil
+			}
+		}
+	}
+	return "", "", errors.New("no_exit_identity: Test Channel returned no valid exit identity")
 }
 
 func (application *Application) configuredScoringProvider(ctx context.Context) (ScoringProvider, error) {
@@ -580,32 +637,28 @@ func (application *Application) scoringThreshold(ctx context.Context, provider s
 	return value
 }
 
-func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration) (float64, string, error) {
+func (application *Application) scoreNode(ctx context.Context, exitIdentity string, node evaluationNode, channel AvailabilityChannel, jitter time.Duration, ignoreCache bool) (float64, string, error) {
 	providerValue := application.dependencies.Scoring
 	if configured, err := application.configuredScoringProvider(ctx); err == nil {
 		providerValue = configured
 	}
-	if provider, ok := providerValue.(ChannelScoringProvider); ok {
+	provider, ok := providerValue.(ChannelScoringProvider)
+	if !ok {
+		return 0, addressFamily(exitIdentity), errors.New("Scoring Provider cannot bind requests to the verified Test Channel")
+	}
+	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, ignoreCache, func() (float64, error) {
 		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
 		if !hasTransport {
-			return 0, addressFamily(exitIdentity), errors.New("Test Channel cannot provide scoring transport")
+			return 0, errors.New("Test Channel cannot provide scoring transport")
 		}
 		client, err := transportProvider.HTTPClient(ctx, ProxyNode{Name: node.Name, Config: node.Config})
 		if err != nil {
-			return 0, addressFamily(exitIdentity), err
+			return 0, err
 		}
-		return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) {
-			if err := waitScoringJitter(ctx, jitter); err != nil {
-				return 0, err
-			}
-			return provider.ScoreWithClient(ctx, exitIdentity, client)
-		})
-	}
-	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, func() (float64, error) {
 		if err := waitScoringJitter(ctx, jitter); err != nil {
 			return 0, err
 		}
-		return providerValue.Score(ctx, exitIdentity)
+		return provider.ScoreWithClient(ctx, exitIdentity, client)
 	})
 }
 
@@ -634,12 +687,7 @@ func medianLatency(values []time.Duration) time.Duration {
 	return sorted[middle-1] + (sorted[middle]-sorted[middle-1])/2
 }
 
-func (application *Application) scoreWithCache(ctx context.Context, exitIdentity string) (float64, string, error) {
-	provider := application.dependencies.Scoring
-	return application.scoreWithCacheUsing(ctx, exitIdentity, provider, func() (float64, error) { return provider.Score(ctx, exitIdentity) })
-}
-
-func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, scoreProvider func() (float64, error)) (float64, string, error) {
+func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIdentity string, provider ScoringProvider, ignoreCache bool, scoreProvider func() (float64, error)) (float64, string, error) {
 	application.scoreCacheMu.Lock()
 	defer application.scoreCacheMu.Unlock()
 	family := addressFamily(exitIdentity)
@@ -650,9 +698,10 @@ func (application *Application) scoreWithCacheUsing(ctx context.Context, exitIde
 	var score float64
 	var scoredAt string
 	err := application.database.QueryRowContext(ctx, `SELECT score, scored_at FROM score_cache WHERE provider = ? AND exit_identity = ?`, providerKey, exitIdentity).Scan(&score, &scoredAt)
-	if err == nil {
+	if !ignoreCache && err == nil {
 		when, parseErr := time.Parse(time.RFC3339Nano, scoredAt)
-		if parseErr == nil && time.Since(when) <= 24*time.Hour {
+		now := time.Now().UTC()
+		if parseErr == nil && !when.After(now) && now.Sub(when) <= 24*time.Hour {
 			return score, family, nil
 		}
 	}

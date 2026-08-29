@@ -37,15 +37,42 @@ func (application *Application) handleTestEvaluation(response http.ResponseWrite
 		writeError(response, http.StatusBadGateway, err)
 		return
 	}
-	score, err := application.dependencies.Scoring.Score(request.Context(), probe.ExitIdentity)
+	candidates := probe.ExitIdentities
+	if len(candidates) == 0 && probe.ExitIdentity != "" {
+		// Probe predates the candidate contract; the legacy test adapter is
+		// trusted only for this explicitly test-only endpoint.
+		candidates = []ExitIdentityCandidate{{IP: probe.ExitIdentity, Verified: true}}
+	}
+	exitIdentity, family, err := selectExitIdentity(candidates)
+	if err != nil {
+		writeError(response, http.StatusBadGateway, err)
+		return
+	}
+	provider, ok := application.dependencies.Scoring.(ChannelScoringProvider)
+	if !ok {
+		writeError(response, http.StatusBadGateway, errors.New("Scoring Provider cannot bind requests to the verified Test Channel"))
+		return
+	}
+	transport, ok := application.dependencies.TestChannel.(TestChannelHTTPClient)
+	if !ok {
+		writeError(response, http.StatusBadGateway, errors.New("Test Channel cannot provide scoring transport"))
+		return
+	}
+	client, err := transport.HTTPClient(request.Context(), node)
+	if err != nil {
+		writeError(response, http.StatusBadGateway, err)
+		return
+	}
+	score, err := provider.ScoreWithClient(request.Context(), exitIdentity, client)
 	if err != nil {
 		writeError(response, http.StatusBadGateway, err)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
-		"node":         node.Name,
-		"exitIdentity": probe.ExitIdentity,
-		"score":        score,
+		"node":          node.Name,
+		"exitIdentity":  exitIdentity,
+		"addressFamily": family,
+		"score":         score,
 	})
 }
 

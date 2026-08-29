@@ -58,8 +58,16 @@ type nodeRejection struct {
 }
 
 type ProbeResult struct {
-	ExitIdentity string
-	Latency      time.Duration
+	ExitIdentity   string
+	ExitIdentities []ExitIdentityCandidate
+	Latency        time.Duration
+}
+
+// ExitIdentityCandidate is an address observed through the Test Channel.
+// Verified must be true before the address can be scored or published.
+type ExitIdentityCandidate struct {
+	IP       string
+	Verified bool
 }
 
 const (
@@ -82,10 +90,11 @@ func defaultAvailabilityURLsJSON() string {
 }
 
 type AvailabilityAttempt struct {
-	Success      bool
-	Verified     bool
-	Latency      time.Duration
-	ExitIdentity string
+	Success        bool
+	Verified       bool
+	Latency        time.Duration
+	ExitIdentity   string
+	ExitIdentities []ExitIdentityCandidate
 }
 
 type AvailabilityChannel interface {
@@ -147,15 +156,16 @@ type Config struct {
 }
 
 type Application struct {
-	database      *sql.DB
-	handler       http.Handler
-	dependencies  Dependencies
-	evaluationMu  sync.Mutex
-	scoreCacheMu  sync.Mutex
-	runID         string
-	pendingRun    bool
-	lifecycleCtx  context.Context
-	stopScheduler context.CancelFunc
+	database           *sql.DB
+	handler            http.Handler
+	dependencies       Dependencies
+	evaluationMu       sync.Mutex
+	scoreCacheMu       sync.Mutex
+	runID              string
+	pendingRun         bool
+	pendingIgnoreCache bool
+	lifecycleCtx       context.Context
+	stopScheduler      context.CancelFunc
 }
 
 type HealthComponent struct {
