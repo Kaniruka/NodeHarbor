@@ -638,8 +638,18 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
 		application.beginEvaluationPhase(ctx, id, "publication")
 		if err := application.publishQualifiedNodes(runContext, id); err != nil {
+			if ctx.Err() == nil && runContext.Err() != nil {
+				application.setPublicationResult(ctx, id, "retained")
+				application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor interrupted publication; previous Publication Snapshot retained")
+				return
+			}
 			application.setPublicationResult(ctx, id, "failed")
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
+			return
+		}
+		if ctx.Err() == nil && runContext.Err() != nil {
+			application.setPublicationResult(ctx, id, "retained")
+			application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor interrupted publication; previous Publication Snapshot retained")
 			return
 		}
 		application.finishEvaluationPhase(ctx, id, "publication", "completed", "")
