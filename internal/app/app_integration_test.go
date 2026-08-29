@@ -221,6 +221,37 @@ func TestSchedulerIsDisabledByZeroAndUsesUpdatedIntervalWithoutRestart(t *testin
 	}
 }
 
+func TestEvaluationTriggersCoalesceIntoAtMostOneFollowUpRun(t *testing.T) {
+	upstream := &gateUpstream{document: []byte("proxies:\n  - name: gated\n    type: ss\n    server: gated.example\n    port: 443\n")}
+	server := openEvaluationApplication(t, upstream, &recordingKernel{}, unavailableTestChannel{})
+	created := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Gated", "kind": "url", "url": "https://gated.example/sub"})
+	_ = created.Body.Close()
+	upstream.enableGate()
+	start := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = start.Body.Close()
+	select {
+	case <-upstream.started:
+	case <-time.After(time.Second):
+		t.Fatal("first Evaluation Run did not reach the refresh boundary")
+	}
+	for range 2 {
+		response := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("coalesced trigger status=%d", response.StatusCode)
+		}
+	}
+	upstream.releaseGate()
+	waitForEvaluationRun(t, server.URL)
+	var history []struct {
+		Trigger string `json:"trigger"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs", &history)
+	if len(history) != 2 || history[0].Trigger != "coalesced" {
+		t.Fatalf("coalesced history = %+v", history)
+	}
+}
+
 func TestHistoryRetentionRemovesExpiredRunsWithoutChangingPublicationSnapshot(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "nodeharbor.db")
 	clock := newTestClock(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC))
@@ -2156,6 +2187,48 @@ type recordingUpstream struct {
 func (upstream *recordingUpstream) Fetch(_ context.Context, request app.UpstreamRequest) ([]byte, error) {
 	upstream.request = request
 	return upstream.document, nil
+}
+
+type gateUpstream struct {
+	mu          sync.Mutex
+	document    []byte
+	blocked     bool
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func (upstream *gateUpstream) Fetch(_ context.Context, _ app.UpstreamRequest) ([]byte, error) {
+	upstream.mu.Lock()
+	blocked := upstream.blocked
+	started := upstream.started
+	release := upstream.release
+	document := append([]byte(nil), upstream.document...)
+	upstream.mu.Unlock()
+	if blocked {
+		upstream.startOnce.Do(func() { close(started) })
+		<-release
+	}
+	return document, nil
+}
+
+func (upstream *gateUpstream) enableGate() {
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	upstream.blocked = true
+	upstream.started = make(chan struct{})
+	upstream.release = make(chan struct{})
+	upstream.startOnce = sync.Once{}
+	upstream.releaseOnce = sync.Once{}
+}
+
+func (upstream *gateUpstream) releaseGate() {
+	upstream.mu.Lock()
+	upstream.blocked = false
+	release := upstream.release
+	upstream.mu.Unlock()
+	upstream.releaseOnce.Do(func() { close(release) })
 }
 
 type interruptibleChannel struct {

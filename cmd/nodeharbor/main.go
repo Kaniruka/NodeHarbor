@@ -28,7 +28,7 @@ func main() {
 }
 
 func run() error {
-	listenAddress := flag.String("listen", "127.0.0.1:9876", "HTTP listen address")
+	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted management port on loopback")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
 	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
 	flag.Parse()
@@ -49,6 +49,13 @@ func run() error {
 		return err
 	}
 	defer application.Close()
+	if *listenAddress == "" {
+		port, err := application.ListenPort(context.Background())
+		if err != nil {
+			return fmt.Errorf("read configured listen port: %w", err)
+		}
+		*listenAddress = fmt.Sprintf("127.0.0.1:%d", port)
+	}
 
 	server := &http.Server{
 		Addr:              *listenAddress,

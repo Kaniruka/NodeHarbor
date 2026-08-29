@@ -267,6 +267,14 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 
 func (application *Application) Handler() http.Handler { return application.handler }
 
+func (application *Application) ListenPort(ctx context.Context) (int, error) {
+	settings, err := application.readSettings(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return settings.ListenPort, nil
+}
+
 func (application *Application) Close() error {
 	if application.stopScheduler != nil {
 		application.stopScheduler()
@@ -349,7 +357,7 @@ func (application *Application) ensureInitialPublication(ctx context.Context) er
 	if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
 		return fmt.Errorf("validate initial published subscription: %w", err)
 	}
-	if _, err := application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?)`, document, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?)`, document, application.clock.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("store initial published subscription: %w", err)
 	}
 	return nil

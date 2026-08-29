@@ -789,7 +789,7 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 	if err := application.dependencies.Kernel.Validate(ctx, document); err != nil {
 		return fmt.Errorf("validate Published Subscription: %w", err)
 	}
-	_, err = application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = application.database.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, application.clock.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 
