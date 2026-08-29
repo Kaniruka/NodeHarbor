@@ -10,9 +10,11 @@ $requiredFiles = @(
     'smoke.sh',
     'nodeharbor-lifecycle.sh',
     'bin\nodeharbor',
+    'bin\nodeharbor.json',
     'bin\nodeharbor-core',
     'bin\nodeharbor-core.json',
     'webroot\index.html',
+    'LICENSE',
     'THIRD_PARTY_NOTICES'
 )
 foreach ($relativePath in $requiredFiles) {
@@ -41,6 +43,13 @@ $corePath = Join-Path $root 'bin\nodeharbor-core'
 $nodeharborPath = Join-Path $root 'bin\nodeharbor'
 Assert-Arm64Elf $nodeharborPath 'NodeHarbor'
 Assert-Arm64Elf $corePath 'Mihomo'
+$nodeharborMetadata = Get-Content -Raw -LiteralPath (Join-Path $root 'bin\nodeharbor.json') | ConvertFrom-Json
+if ($nodeharborMetadata.platform -ne 'android-arm64-v8' -or $nodeharborMetadata.version -ne '0.2.0' -or $nodeharborMetadata.license -ne 'MIT') {
+    throw "NodeHarbor metadata is invalid: $($nodeharborMetadata | ConvertTo-Json -Compress)"
+}
+$nodeharborDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeharborPath).Hash.ToUpperInvariant()
+if ($nodeharborDigest -ne $nodeharborMetadata.executableSHA256.ToUpperInvariant()) { throw "NodeHarbor digest mismatch: $nodeharborDigest" }
+if (-not [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($nodeharborPath)).Contains($nodeharborMetadata.version)) { throw 'NodeHarbor version is not embedded in the binary' }
 $coreDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $corePath).Hash.ToUpperInvariant()
 if ($coreDigest -ne $metadata.executableSHA256.ToUpperInvariant()) { throw "KernelSU Mihomo digest mismatch: $coreDigest" }
 if ($coreDigest -ne '94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD') { throw "KernelSU Mihomo digest is not the pinned arm64 digest: $coreDigest" }
@@ -56,6 +65,7 @@ foreach ($requiredNotice in @(
 )) {
     if (-not $noticeText.Contains($requiredNotice)) { throw "THIRD_PARTY_NOTICES is incomplete: missing '$requiredNotice'" }
 }
+if (-not (Get-Content -Raw -LiteralPath (Join-Path $root 'LICENSE')).Contains('MIT License')) { throw 'MIT license notice is missing' }
 
 $service = Get-Content -Raw -LiteralPath (Join-Path $root 'service.sh')
 $lifecycle = Get-Content -Raw -LiteralPath (Join-Path $root 'nodeharbor-lifecycle.sh')

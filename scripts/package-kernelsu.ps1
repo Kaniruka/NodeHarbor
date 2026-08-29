@@ -29,7 +29,9 @@ if ($mihomoDigest -ne $metadata.executableSHA256.ToUpperInvariant() -or $mihomoD
     throw "Mihomo Android arm64-v8 executable checksum mismatch: $mihomoDigest"
 }
 $noticePath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES'
+$licensePath = Join-Path $projectRoot 'LICENSE'
 if (-not (Test-Path -LiteralPath $noticePath -PathType Leaf)) { throw 'THIRD_PARTY_NOTICES is missing' }
+if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) { throw 'LICENSE is missing' }
 $noticeText = Get-Content -Raw -LiteralPath $noticePath
 foreach ($requiredNotice in @(
     'NodeHarbor bundles Mihomo v1.19.30 for Windows x64 and Android arm64-v8.',
@@ -48,6 +50,15 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 Push-Location $projectRoot
 try { $env:GOOS='android'; $env:GOARCH='arm64'; $env:CGO_ENABLED='0'; go build -trimpath -ldflags "-X main.version=$moduleVersion" -o (Join-Path $stage 'bin\nodeharbor') ./cmd/nodeharbor }
 finally { Remove-Item Env:GOOS -ErrorAction SilentlyContinue; Remove-Item Env:GOARCH -ErrorAction SilentlyContinue; Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue; Pop-Location }
+$nodeharborPath = Join-Path $stage 'bin\nodeharbor'
+$nodeharborDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeharborPath).Hash.ToUpperInvariant()
+$nodeharborMetadata = [ordered]@{
+    platform = 'android-arm64-v8'
+    version = $moduleVersion
+    executableSHA256 = $nodeharborDigest
+    license = 'MIT'
+}
+$nodeharborMetadata | ConvertTo-Json | Set-Content -NoNewline -LiteralPath (Join-Path $stage 'bin\nodeharbor.json')
 Copy-Item -LiteralPath $mihomo -Destination (Join-Path $stage 'bin\nodeharbor-core')
 Copy-Item -LiteralPath $metadataPath -Destination (Join-Path $stage 'bin\nodeharbor-core.json')
 Copy-Item -LiteralPath $modulePath -Destination $stage
@@ -57,6 +68,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'kernelsu\action.sh') -Destinatio
 Copy-Item -LiteralPath (Join-Path $projectRoot 'kernelsu\smoke.sh') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $projectRoot 'kernelsu\nodeharbor-lifecycle.sh') -Destination $stage
 Copy-Item -LiteralPath $noticePath -Destination $stage
+Copy-Item -LiteralPath $licensePath -Destination $stage
 Copy-Item -Path (Join-Path $projectRoot 'internal\web\dist\*') -Destination (Join-Path $stage 'webroot') -Recurse
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive
