@@ -30,17 +30,18 @@ type evaluationRun struct {
 	Reason     string `json:"reason,omitempty"`
 }
 type evaluationNodeResult struct {
-	NodeID          string   `json:"nodeId"`
-	Name            string   `json:"name"`
-	State           string   `json:"state"`
-	Attempts        int      `json:"attempts"`
-	Successful      int      `json:"successful"`
-	MedianLatencyMS float64  `json:"medianLatencyMs"`
-	ExitIdentity    string   `json:"exitIdentity,omitempty"`
-	AddressFamily   string   `json:"addressFamily,omitempty"`
-	IPScore         *float64 `json:"ipScore,omitempty"`
-	ScoreSource     string   `json:"scoreSource,omitempty"`
-	Reason          string   `json:"reason,omitempty"`
+	NodeID          string         `json:"nodeId"`
+	Name            string         `json:"name"`
+	Config          map[string]any `json:"-"`
+	State           string         `json:"state"`
+	Attempts        int            `json:"attempts"`
+	Successful      int            `json:"successful"`
+	MedianLatencyMS float64        `json:"medianLatencyMs"`
+	ExitIdentity    string         `json:"exitIdentity,omitempty"`
+	AddressFamily   string         `json:"addressFamily,omitempty"`
+	IPScore         *float64       `json:"ipScore,omitempty"`
+	ScoreSource     string         `json:"scoreSource,omitempty"`
+	Reason          string         `json:"reason,omitempty"`
 }
 type evaluationRunResponse struct {
 	evaluationRun
@@ -118,6 +119,11 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 	}
 	if !columns["address_family"] {
 		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN address_family TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !columns["config"] {
+		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_results ADD COLUMN config BLOB NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -343,6 +349,10 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			return
 		}
 	}
+	if err := application.refreshUpstreamSubscriptions(ctx); err != nil {
+		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
+		return
+	}
 	nodes, err := application.evaluationNodes(ctx)
 	if err != nil {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, err)
@@ -383,7 +393,12 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		} else {
 			failed++
 		}
-		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason)
+		config, configErr := yaml.Marshal(item.Config)
+		if configErr != nil {
+			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, configErr)
+			return
+		}
+		_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_results(run_id, node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, item.NodeID, item.Name, item.State, item.Attempts, item.Successful, item.MedianLatencyMS, item.ExitIdentity, item.AddressFamily, item.IPScore, item.ScoreSource, item.Reason, config)
 		_, _ = application.database.ExecContext(ctx, `UPDATE evaluation_runs SET total = ?, passed = ?, failed = ? WHERE id = ?`, passed+failed, passed, failed, id)
 	}
 	if passed > 0 {
@@ -393,6 +408,25 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		}
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
+}
+
+func (application *Application) refreshUpstreamSubscriptions(ctx context.Context) error {
+	subscriptions, err := application.listUpstreamSubscriptions(ctx)
+	if err != nil {
+		return fmt.Errorf("list Upstream Subscriptions for refresh: %w", err)
+	}
+	for _, subscription := range subscriptions {
+		if !subscription.Enabled {
+			continue
+		}
+		if _, _, err := application.synchronizeUpstreamSubscription(ctx, subscription); err != nil {
+			// synchronizeUpstreamSubscription records the stale state and last
+			// successful document. A single source failure must not discard
+			// other candidates or the previous publication snapshot.
+			continue
+		}
+	}
+	return nil
 }
 
 func (application *Application) launchEvaluationRunLocked(id string, ignoreCache bool) {
@@ -451,7 +485,7 @@ func (application *Application) cleanupEvaluationHistory(ctx context.Context) {
 }
 
 func (application *Application) publishQualifiedNodes(ctx context.Context, runID string) error {
-	rows, err := application.database.QueryContext(ctx, `SELECT p.config FROM evaluation_results r JOIN proxy_nodes p ON p.id = r.node_id WHERE r.run_id = ? AND r.state = 'passed' ORDER BY r.name`, runID)
+	rows, err := application.database.QueryContext(ctx, `SELECT r.config FROM evaluation_results r WHERE r.run_id = ? AND r.state = 'passed' ORDER BY r.name`, runID)
 	if err != nil {
 		return err
 	}
@@ -461,6 +495,9 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 		var data []byte
 		if err := rows.Scan(&data); err != nil {
 			return err
+		}
+		if len(data) == 0 {
+			return errors.New("qualified Proxy Node configuration snapshot is empty")
 		}
 		var config map[string]any
 		if err := yaml.Unmarshal(data, &config); err != nil {
@@ -532,7 +569,7 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 }
 
 func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) (result evaluationNodeResult) {
-	result = evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
+	result = evaluationNodeResult{NodeID: node.ID, Name: node.Name, Config: cloneProxyNodeConfig(node.Config), State: "failed"}
 	proxyNode := ProxyNode{Name: node.Name, Config: node.Config}
 	if releaser, ok := application.dependencies.TestChannel.(interface{ Release(ProxyNode) error }); ok {
 		defer func() {

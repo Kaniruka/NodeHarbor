@@ -1101,6 +1101,93 @@ func TestSuccessfulEvaluationPublishesOnlyQualifiedNodes(t *testing.T) {
 	}
 }
 
+func TestEvaluationRunRefreshesUpstreamBeforePublishing(t *testing.T) {
+	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: first\n    type: ss\n    server: first.example\n    port: 443\n")}
+	server := openEvaluationApplication(t, upstream, &nodeValidationKernel{}, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	upstream.document = []byte("proxies:\n  - name: second\n    type: ss\n    server: second.example\n    port: 443\n")
+	runEvaluation(t, server.URL, map[string]any{})
+
+	publicationResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publicationResponse.Body.Close()
+	var publication struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.NewDecoder(publicationResponse.Body).Decode(&publication); err != nil {
+		t.Fatal(err)
+	}
+	if len(publication.Proxies) != 1 || publication.Proxies[0]["server"] != "second.example" {
+		t.Fatalf("Evaluation Run did not refresh its Upstream Subscription: %+v", publication.Proxies)
+	}
+}
+
+func TestPublicationUsesTheConfigurationEvaluatedByTheCurrentRun(t *testing.T) {
+	upstream := &recordingUpstream{document: []byte("proxies:\n  - name: first\n    type: ss\n    server: first.example\n    port: 443\n")}
+	channel := &concurrencyChannel{}
+	server := openEvaluationApplication(t, upstream, &nodeValidationKernel{}, channel)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Publish", "kind": "url", "url": "https://example.test/sub"})
+	var subscription struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&subscription); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	channel.probeStarted = make(chan struct{})
+	channel.releaseProbe = make(chan struct{})
+	upstream.document = []byte("proxies:\n  - name: first\n    type: ss\n    server: first.example\n    port: 443\n")
+	startResponse := postJSONResponse(t, server.URL+"/api/evaluation-runs", map[string]any{})
+	_ = startResponse.Body.Close()
+	if startResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("start evaluation status=%d", startResponse.StatusCode)
+	}
+	<-channel.probeStarted
+
+	updateBody, err := json.Marshal(map[string]any{"name": "Renamed", "url": "https://example.test/sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRequest, err := http.NewRequest(http.MethodPut, server.URL+"/api/upstream-subscriptions/"+subscription.ID, bytes.NewReader(updateBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRequest.Header.Set("Content-Type", "application/json")
+	refreshResponse, err := http.DefaultClient.Do(updateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refreshResponse.Body.Close()
+	if refreshResponse.StatusCode != http.StatusOK {
+		t.Fatalf("update status=%d", refreshResponse.StatusCode)
+	}
+	close(channel.releaseProbe)
+	waitForEvaluationRun(t, server.URL)
+
+	publicationResponse, err := http.Get(server.URL + "/sub/clash.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publicationResponse.Body.Close()
+	var publication struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.NewDecoder(publicationResponse.Body).Decode(&publication); err != nil {
+		t.Fatal(err)
+	}
+	if len(publication.Proxies) != 1 || publication.Proxies[0]["server"] != "first.example" || publication.Proxies[0]["name"] != "[Publish] first" {
+		t.Fatalf("publication used a configuration changed during evaluation: %+v", publication.Proxies)
+	}
+}
+
 func TestPublicationValidationFailurePreservesSnapshotAndReportsReason(t *testing.T) {
 	kernel := &rejectingPublicationKernel{}
 	server := openEvaluationApplication(t, &recordingUpstream{document: []byte("proxies:\n  - name: candidate\n    type: ss\n    server: example.test\n    port: 443\n")}, kernel, &availabilityChannel{verified: true, latencies: []time.Duration{100 * time.Millisecond}})
