@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,18 +42,18 @@ func (provider IPLarkProvider) ScoreWithClient(ctx context.Context, exitIdentity
 
 func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, client *http.Client) (float64, error) {
 	if client == nil || provider.Endpoint == "" {
-		return 0, errors.New("IPLark provider is not configured")
+		return 0, providerUnavailable("IPLark provider is not configured")
 	}
 	parsed, err := url.Parse(provider.Endpoint)
 	if err != nil {
-		return 0, errors.New("IPLark provider endpoint is invalid")
+		return 0, providerUnavailable("IPLark provider endpoint is invalid")
 	}
 	query := parsed.Query()
 	query.Set("ip", exitIdentity)
 	parsed.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return 0, fmt.Errorf("create IPLark request: %w", err)
+		return 0, providerUnavailable(fmt.Sprintf("create IPLark request: %v", err))
 	}
 	request.Header.Set("Accept", "application/json, text/html")
 	if provider.UserAgent != "" {
@@ -62,15 +61,15 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("IPLark request failed: %w", err)
+		return 0, providerUnavailable(fmt.Sprintf("IPLark request failed: %v", err))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {
-		return 0, errors.New("IPLark response could not be read")
+		return 0, providerUnavailable("IPLark response could not be read")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, fmt.Errorf("IPLark provider unavailable: HTTP %d", response.StatusCode)
+		return 0, providerUnavailable(fmt.Sprintf("IPLark provider unavailable: HTTP %d", response.StatusCode))
 	}
 	if score, ok := parseIPLarkJSON(body); ok {
 		return score, nil
@@ -78,7 +77,7 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	if score, ok := parseIPLarkHTML(body); ok {
 		return score, nil
 	}
-	return 0, errors.New("IPLark provider unavailable: score was not found")
+	return 0, providerUnavailable("IPLark provider unavailable: score was not found")
 }
 
 func parseIPLarkJSON(body []byte) (float64, bool) {

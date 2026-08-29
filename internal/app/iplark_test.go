@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,7 +32,10 @@ func TestIPLarkProviderParsesHTMLAndMapsFailures(t *testing.T) {
 	}{
 		{name: "html", body: `<div>IP Score <strong>91</strong></div>`, status: 200, want: 91},
 		{name: "forbidden", body: `captcha`, status: http.StatusForbidden, wantErr: true},
+		{name: "rate limited", body: `too many requests`, status: http.StatusTooManyRequests, wantErr: true},
+		{name: "challenge", body: `<html><title>Just a moment...</title><body>checking your browser</body></html>`, status: 200, wantErr: true},
 		{name: "changed response", body: `{"status":"success","data":{"value":"unknown"}}`, status: 200, wantErr: true},
+		{name: "parse failure", body: `not an IP score`, status: 200, wantErr: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,12 +44,37 @@ func TestIPLarkProviderParsesHTMLAndMapsFailures(t *testing.T) {
 			}))
 			defer server.Close()
 			score, err := (IPLarkProvider{Client: server.Client(), Endpoint: server.URL}).Score(context.Background(), "2001:db8::1")
-			if testCase.wantErr && err == nil {
-				t.Fatal("expected provider unavailable error")
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("expected provider unavailable error")
+				}
+				if !errors.Is(err, errScoringProviderUnavailable) {
+					t.Fatalf("error=%v is not classified as provider unavailable", err)
+				}
 			}
 			if !testCase.wantErr && (err != nil || score != testCase.want) {
 				t.Fatalf("score=%v err=%v", score, err)
 			}
 		})
 	}
+}
+
+func TestIPLarkProviderMapsTimeoutToProviderUnavailable(t *testing.T) {
+	provider := IPLarkProvider{
+		Client: &http.Client{Transport: iplarkRoundTripper(func(request *http.Request) (*http.Response, error) {
+			return nil, context.DeadlineExceeded
+		})},
+		Endpoint: "https://iplark.example/ipscore",
+	}
+
+	_, err := provider.Score(context.Background(), "203.0.113.8")
+	if err == nil || !errors.Is(err, errScoringProviderUnavailable) {
+		t.Fatalf("timeout error=%v, want provider unavailable", err)
+	}
+}
+
+type iplarkRoundTripper func(*http.Request) (*http.Response, error)
+
+func (roundTripper iplarkRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTripper(request)
 }

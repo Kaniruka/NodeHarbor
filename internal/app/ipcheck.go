@@ -74,4 +74,5 @@ func (provider IPCheckProvider) score(ctx context.Context, exitIdentity string, 
 type providerUnavailableError struct{ message string }
 
 func (err providerUnavailableError) Error() string { return err.message }
+func (err providerUnavailableError) Unwrap() error { return errScoringProviderUnavailable }
 func providerUnavailable(message string) error     { return providerUnavailableError{message: message} }

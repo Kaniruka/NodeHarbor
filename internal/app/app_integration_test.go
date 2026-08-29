@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -450,6 +451,68 @@ func TestEvaluationRejectsUnboundScoringProvider(t *testing.T) {
 	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
 	if run.Status != "completed" || len(run.Results) != 1 || run.Results[0].State != "failed" || !strings.HasPrefix(run.Results[0].Reason, "score_unavailable:") || scoring.calls != 0 {
 		t.Fatalf("run=%+v calls=%d", run, scoring.calls)
+	}
+}
+
+func TestDefaultAssemblyUsesIPLarkThroughTheVerifiedTestChannel(t *testing.T) {
+	var directRequests, channelRequests int
+	directServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directRequests++
+		_, _ = w.Write([]byte(`{"data":{"ip_score":12}}`))
+	}))
+	defer directServer.Close()
+	channelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		channelRequests++
+		if r.URL.Query().Get("ip") != "198.51.100.77" {
+			t.Errorf("channel fixture ip=%q", r.URL.Query().Get("ip"))
+		}
+		_, _ = w.Write([]byte(`{"data":{"ip_score":88}}`))
+	}))
+	defer channelServer.Close()
+
+	channel := &iplarkFixtureChannel{destination: channelServer.URL}
+	dependencies := app.DefaultDependencies(&nodeValidationKernel{})
+	provider, ok := dependencies.Scoring.(app.IPLarkProvider)
+	if !ok {
+		t.Fatalf("default scoring provider=%T, want app.IPLarkProvider", dependencies.Scoring)
+	}
+	provider.Client = directServer.Client()
+	provider.Endpoint = directServer.URL + "/ipscore"
+	dependencies.Scoring = provider
+	dependencies.ScoringProviders["iplark"] = provider
+	dependencies.Upstream = &recordingUpstream{document: []byte("proxies:\n  - name: production-assembly\n    type: ss\n    server: example.test\n    port: 443\n")}
+	dependencies.TestChannel = channel
+	dependencies.Isolation = nil
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)}}
+	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets)}, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	server := httptest.NewServer(instance.Handler())
+	defer server.Close()
+
+	putJSON(t, server.URL+"/api/settings", map[string]any{"availabilityAttempts": 1, "availabilityRequiredSuccesses": 1, "availabilityURLs": []string{"https://probe.example/204"}, "evaluationWorkerCount": 1, "scoringJitterMs": 0})
+	response := postJSONResponse(t, server.URL+"/api/upstream-subscriptions", map[string]any{"name": "Eval", "kind": "url", "url": "https://example.test/sub"})
+	_ = response.Body.Close()
+	runEvaluation(t, server.URL, map[string]any{})
+
+	var run struct {
+		Status  string `json:"status"`
+		Results []struct {
+			State         string   `json:"state"`
+			IPScore       *float64 `json:"ipScore"`
+			AddressFamily string   `json:"addressFamily"`
+			ScoreSource   string   `json:"scoreSource"`
+			Reason        string   `json:"reason"`
+		} `json:"results"`
+	}
+	getJSON(t, server.URL+"/api/evaluation-runs/current", &run)
+	if run.Status != "completed" || len(run.Results) != 1 || run.Results[0].State != "passed" || run.Results[0].IPScore == nil || *run.Results[0].IPScore != 88 || run.Results[0].AddressFamily != "ipv4" || run.Results[0].ScoreSource != "provider" || run.Results[0].Reason != "" {
+		t.Fatalf("run=%+v", run)
+	}
+	if directRequests != 0 || channelRequests != 1 || channel.httpClientCalls != 1 {
+		t.Fatalf("direct requests=%d channel requests=%d channel clients=%d", directRequests, channelRequests, channel.httpClientCalls)
 	}
 }
 
@@ -1181,6 +1244,40 @@ func (upstream *recordingUpstream) Fetch(_ context.Context, request app.Upstream
 type recordingTestChannel struct {
 	node   app.ProxyNode
 	result app.ProbeResult
+}
+
+type iplarkFixtureChannel struct {
+	destination     string
+	httpClientCalls int
+}
+
+func (channel *iplarkFixtureChannel) Probe(context.Context, app.ProxyNode) (app.ProbeResult, error) {
+	return app.ProbeResult{}, nil
+}
+
+func (channel *iplarkFixtureChannel) ProbeAttempt(context.Context, app.ProxyNode, string) (app.AvailabilityAttempt, error) {
+	return app.AvailabilityAttempt{Success: true, Verified: true, Latency: 100 * time.Millisecond}, nil
+}
+
+func (channel *iplarkFixtureChannel) DiscoverExitIdentities(_ context.Context, _ app.ProxyNode, family string) ([]app.ExitIdentityCandidate, error) {
+	if family != "ipv4" {
+		return nil, app.ErrUnavailable
+	}
+	return []app.ExitIdentityCandidate{{IP: "198.51.100.77", Verified: true}}, nil
+}
+
+func (channel *iplarkFixtureChannel) HTTPClient(context.Context, app.ProxyNode) (*http.Client, error) {
+	channel.httpClientCalls++
+	destination, err := url.Parse(channel.destination)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		redirected := request.Clone(request.Context())
+		redirected.URL.Scheme = destination.Scheme
+		redirected.URL.Host = destination.Host
+		return http.DefaultTransport.RoundTrip(redirected)
+	})}, nil
 }
 
 func (channel *recordingTestChannel) Probe(_ context.Context, node app.ProxyNode) (app.ProbeResult, error) {
