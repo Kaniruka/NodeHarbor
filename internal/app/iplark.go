@@ -137,7 +137,7 @@ func containsFailureMarker(value any) bool {
 		}
 	case string:
 		content := strings.ToLower(item)
-		for _, marker := range []string{"error", "captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied"} {
+		for _, marker := range []string{"error", "failed", "failure", "blocked", "rate limited", "rate_limited", "captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied"} {
 			if strings.Contains(content, marker) {
 				return true
 			}

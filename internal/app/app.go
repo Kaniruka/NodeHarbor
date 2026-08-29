@@ -176,6 +176,7 @@ type Application struct {
 	runID              string
 	pendingRun         bool
 	pendingIgnoreCache bool
+	closed             bool
 	lifecycleCtx       context.Context
 	stopScheduler      context.CancelFunc
 }
@@ -243,6 +244,9 @@ func (application *Application) Close() error {
 	if application.stopScheduler != nil {
 		application.stopScheduler()
 	}
+	application.evaluationMu.Lock()
+	application.closed = true
+	application.evaluationMu.Unlock()
 	application.evaluationWG.Wait()
 	closeErr := application.database.Close()
 	if channel, ok := application.dependencies.TestChannel.(interface{ Close() error }); ok {

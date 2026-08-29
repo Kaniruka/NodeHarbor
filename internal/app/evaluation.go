@@ -208,6 +208,10 @@ func (application *Application) handleStartEvaluationRun(w http.ResponseWriter, 
 
 func (application *Application) startEvaluationRun(ctx context.Context, ignoreCache bool) (evaluationRunResponse, bool, error) {
 	application.evaluationMu.Lock()
+	if application.closed {
+		application.evaluationMu.Unlock()
+		return evaluationRunResponse{}, false, errors.New("Application is closed")
+	}
 	if application.runID != "" {
 		id := application.runID
 		application.pendingRun = true
@@ -227,8 +231,8 @@ func (application *Application) startEvaluationRun(ctx context.Context, ignoreCa
 		return evaluationRunResponse{}, false, err
 	}
 	application.runID = id
+	application.launchEvaluationRunLocked(id, ignoreCache)
 	application.evaluationMu.Unlock()
-	application.launchEvaluationRun(id, ignoreCache)
 	run, err := application.readEvaluationRun(ctx, id)
 	return run, true, err
 }
@@ -305,17 +309,18 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.pendingRun = false
 		application.pendingIgnoreCache = false
 		if pending {
+			if application.lifecycleCtx.Err() != nil || application.closed {
+				application.runID = ""
+				application.evaluationMu.Unlock()
+				return
+			}
 			nextID, err := randomID()
 			if err == nil {
 				now := time.Now().UTC().Format(time.RFC3339Nano)
 				if _, err = application.database.ExecContext(ctx, `INSERT INTO evaluation_runs(id, status, started_at) VALUES (?, 'running', ?)`, nextID, now); err == nil {
 					application.runID = nextID
+					application.launchEvaluationRunLocked(nextID, pendingIgnoreCache)
 					application.evaluationMu.Unlock()
-					if application.lifecycleCtx.Err() == nil {
-						application.launchEvaluationRun(nextID, pendingIgnoreCache)
-					} else {
-						application.runID = ""
-					}
 					return
 				}
 			}
@@ -389,7 +394,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
 }
 
-func (application *Application) launchEvaluationRun(id string, ignoreCache bool) {
+func (application *Application) launchEvaluationRunLocked(id string, ignoreCache bool) {
 	application.evaluationWG.Add(1)
 	go func() {
 		defer application.evaluationWG.Done()

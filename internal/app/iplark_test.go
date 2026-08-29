@@ -42,6 +42,7 @@ func TestIPLarkProviderParsesHTMLAndMapsFailures(t *testing.T) {
 		{name: "captcha metadata score", body: `{"error":"captcha","data":{"ip_score":88}}`, status: 200, wantErr: true},
 		{name: "nested challenge metadata score", body: `{"status":"success","data":{"ip_score":88,"diagnostics":{"challenge":true}}}`, status: 200, wantErr: true},
 		{name: "top-level score with nested challenge", body: `{"status":"success","score":88,"data":{"challenge":true}}`, status: 200, wantErr: true},
+		{name: "failed nested status", body: `{"status":"success","data":{"status":"failed","ip_score":88}}`, status: 200, wantErr: true},
 		{name: "unknown html suffix", body: `<div>IP Score <strong>91</strong></div><p>unexpected</p>`, status: 200, wantErr: true},
 		{name: "parse failure", body: `not an IP score`, status: 200, wantErr: true},
 	} {
