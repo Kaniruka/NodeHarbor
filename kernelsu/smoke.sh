@@ -64,20 +64,13 @@ installation_id_after=$(printf '%s' "$settings_after" | sed -n 's/.*"installatio
 [ "$installation_id_before" = "$installation_id_after" ] || { echo 'SQLite state did not persist across restart' >&2; exit 1; }
 
 "$MODDIR/action.sh" stop || { echo 'owned stop before foreign-process test failed' >&2; exit 1; }
-foreign_dir="$TMP_DIR/foreign-mihomo"
+foreign_dir="$TMP_DIR/foreign-nodeharbor"
 mkdir -p "$foreign_dir"
-cat >"$foreign_dir/config.yaml" <<'EOF'
-mixed-port: 17890
-allow-lan: false
-bind-address: 127.0.0.1
-mode: rule
-log-level: silent
-EOF
-"$MODDIR/bin/nodeharbor-core" -d "$foreign_dir" -f "$foreign_dir/config.yaml" >"$foreign_dir/mihomo.log" 2>&1 &
+"$NODEHARBOR_BIN" --listen 127.0.0.1:17891 --listener-file "$foreign_dir/listener.url" --data "$foreign_dir" --open-browser=false >"$foreign_dir/nodeharbor.log" 2>&1 &
 foreign_pid=$!
 sleep 1
 if ! kill -0 "$foreign_pid" 2>/dev/null; then
-  echo 'foreign Mihomo did not start for ownership test' >&2
+  echo 'foreign NodeHarbor did not start for ownership test' >&2
   exit 1
 fi
 printf '%s\n' "$foreign_pid" >"$PID_FILE"

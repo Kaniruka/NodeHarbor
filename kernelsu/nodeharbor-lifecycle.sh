@@ -59,7 +59,7 @@ nodeharbor_start() {
     if nodeharbor_pid_is_owned "$pid"; then
       process_exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
       case "$process_exe" in
-        "$NODEHARBOR_BIN (deleted)") nodeharbor_stop ;;
+        "$NODEHARBOR_BIN (deleted)") nodeharbor_stop || return 1 ;;
         *) return 0 ;;
       esac
     fi
