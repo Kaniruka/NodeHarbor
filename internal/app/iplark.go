@@ -60,7 +60,7 @@ func (provider IPLarkProvider) score(ctx context.Context, exitIdentity string, c
 	parsed.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return 0, providerUnavailable(fmt.Sprintf("create IPLark request: %v", err))
+		return 0, providerUnavailableWithCause("create IPLark request", err)
 	}
 	request.Header.Set("Accept", "application/json, text/html")
 	if provider.UserAgent != "" {
@@ -150,6 +150,12 @@ func number(value any) (float64, bool) {
 var iplarkHTMLScore = regexp.MustCompile(`(?i)ip\s*score[^0-9]{0,80}([0-9]{1,3}(?:\.[0-9]+)?)`)
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
+	content := strings.ToLower(string(body))
+	for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human"} {
+		if strings.Contains(content, marker) {
+			return 0, false
+		}
+	}
 	match := iplarkHTMLScore.FindSubmatch(body)
 	if len(match) != 2 {
 		return 0, false

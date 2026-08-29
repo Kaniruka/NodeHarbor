@@ -135,6 +135,23 @@ func (channel *MihomoTestChannel) HTTPClient(ctx context.Context, node ProxyNode
 	return lease.client, nil
 }
 
+// Release tears down the isolated core after this Proxy Node has finished its
+// evaluation. The application calls it even when Availability Check fails.
+func (channel *MihomoTestChannel) Release(node ProxyNode) error {
+	key, err := mihomoNodeKey(node)
+	if err != nil {
+		return err
+	}
+	channel.mu.Lock()
+	lease := channel.leases[key]
+	delete(channel.leases, key)
+	channel.mu.Unlock()
+	if lease == nil {
+		return nil
+	}
+	return stopMihomoLease(lease)
+}
+
 func (channel *MihomoTestChannel) startLease(ctx context.Context, node ProxyNode) (*mihomoTestLease, error) {
 	if channel.executablePath == "" {
 		return nil, errors.New("Mihomo executable path is required for Test Channel")
@@ -243,7 +260,10 @@ func freeLoopbackPort() (int, error) {
 }
 
 func mihomoNodeKey(node ProxyNode) (string, error) {
-	data, err := yaml.Marshal(node.Config)
+	data, err := yaml.Marshal(struct {
+		Name   string         `yaml:"name"`
+		Config map[string]any `yaml:"config"`
+	}{Name: node.Name, Config: node.Config})
 	if err != nil {
 		return "", fmt.Errorf("fingerprint Test Channel node: %w", err)
 	}

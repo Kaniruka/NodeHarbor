@@ -513,6 +513,10 @@ func (application *Application) evaluationNodes(ctx context.Context) ([]evaluati
 
 func (application *Application) evaluateNode(ctx context.Context, node evaluationNode, config availabilityConfig, ignoreCache bool, runStartedAt time.Time) evaluationNodeResult {
 	result := evaluationNodeResult{NodeID: node.ID, Name: node.Name, State: "failed"}
+	proxyNode := ProxyNode{Name: node.Name, Config: node.Config}
+	if releaser, ok := application.dependencies.TestChannel.(interface{ Release(ProxyNode) error }); ok {
+		defer func() { _ = releaser.Release(proxyNode) }()
+	}
 	channel, ok := application.dependencies.TestChannel.(AvailabilityChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: availability channel cannot prove Proxy Node ownership"
@@ -529,7 +533,7 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 				lastErr = err
 				break
 			}
-			probe, err := channel.ProbeAttempt(probeCtx, ProxyNode{Name: node.Name, Config: node.Config}, target)
+			probe, err := channel.ProbeAttempt(probeCtx, proxyNode, target)
 			if err != nil {
 				lastErr = err
 				continue
