@@ -16,6 +16,10 @@ _Avoid_: Invalid subscription, deleted subscription
 A connectable proxy configuration taken from an upstream subscription. Distinct proxy nodes may lead to the same public exit address.
 _Avoid_: IP address, line, server
 
+**Published Proxy Group**:
+A group of qualified proxy nodes generated inside a Published Subscription for automatic selection, failover, or manual selection.
+_Avoid_: Subscription, upstream group
+
 **Evaluation Run**:
 A single serialized cycle that refreshes upstream subscriptions, evaluates their proxy nodes, and prepares a publication snapshot.
 _Avoid_: Scan, speed test, refresh

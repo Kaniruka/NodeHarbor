@@ -1,7 +1,7 @@
 # NodeHarbor Design Specification
 
 - Status: Confirmed for implementation
-- Version: 0.3
+- Version: 0.4
 - Frozen on: 2026-08-30
 - Implementation: In progress
 
@@ -43,17 +43,21 @@ Every release pins the Mihomo and Chromium/Playwright versions, verifies distrib
 - URL sources use a common Mihomo-compatible User-Agent by default and may override the User-Agent per source.
 - Arbitrary custom HTTP headers are outside the first-release scope.
 
+Subscriptions display provider-reported remaining traffic and expiry information when it is available. Missing provider metadata is shown as unknown; NodeHarbor does not invent or require manual values for it.
+
 All proxy-node YAML fields are preserved. NodeHarbor does not reconstruct protocol-specific fields or maintain its own proxy-protocol whitelist. Compatibility is determined by loading the node through the bundled Mihomo version.
+
+Import has no user-facing node-validation result view. The document is parsed only far enough to retain the source and extract candidate nodes; malformed input returns a concise import error, while node compatibility validation happens during an Evaluation Run.
 
 Published display names use `[upstream short name] original node name`. A short suffix is added only if that name still collides. Internal identity uses a stable fingerprint of the normalized proxy configuration.
 
 ## 5. Evaluation pipeline
 
-An evaluation run is globally serialized. If a manual or scheduled request arrives while a run is active, NodeHarbor coalesces it into at most one subsequent run.
+An Evaluation Run is globally serialized and is started manually from the Nodes page. The Overview page has no evaluation control, Subscriptions have no per-subscription evaluation control, and NodeHarbor does not run evaluations on a schedule. While a run is active, the global control is unavailable until the run completes.
 
 The pipeline is:
 
-1. Refresh upstream subscriptions.
+1. Refresh enabled upstream subscriptions.
 2. Parse and preserve candidate proxy nodes.
 3. Validate candidates with the bundled Mihomo engine.
 4. Perform the availability check.
@@ -129,12 +133,12 @@ http://<LAN address>:9876/sub/clash.yaml
 
 The port is configurable. The local root path `/` serves the management UI. LAN clients can access only `/sub/clash.yaml`; management UI and management APIs remain loopback-only.
 
-## 10. Scheduling and retention
+## 10. Manual evaluation and retention
 
-- Manual evaluation is always available.
-- Scheduled evaluation defaults to every six hours.
-- Detection history retention is configurable from three through seven days and defaults to seven days.
-- Current subscriptions, settings, latest node states, evaluation runs, score cache, and retained history are stored in SQLite.
+- Manual evaluation is available from the Nodes page through one global evaluation control.
+- NodeHarbor does not perform scheduled or background evaluations; the desktop tool is used interactively.
+- Diagnostic and operational log retention is configurable from three through seven days and defaults to seven days.
+- Current subscriptions, settings, latest node states, evaluation diagnostics, score cache, and retained logs are stored in SQLite.
 - Configuration can be exported as JSON; users do not edit the database directly.
 
 ## 11. Local security model
@@ -147,13 +151,14 @@ The management surface remains loopback-only. Enabling LAN management is outside
 
 The responsive, mobile-first WebUI contains:
 
-1. Dashboard: run status, counts, last publication, and current health.
-2. Upstream subscriptions: add, edit, refresh, remove, and view errors.
-3. Nodes: availability, median latency, exit IP, address family, score, provider, and qualification result.
-4. History: evaluation results retained for the configured three-to-seven-day window.
-5. Settings and logs: thresholds, schedule, retention, port, provider, test URLs, cache controls, browser runtime health, diagnostic mode, and diagnostics.
+1. Overview: subscription count; the most recent Evaluation Run; total, available, and qualified node counts; one-click subscription-link copying; and Scoring Provider availability.
+2. Subscriptions: import, edit, manually refresh, enable, disable, and remove sources; show source type, node count, remaining traffic, last update, and expiry metadata. This page does not show node lists or a node-validation result panel.
+3. Nodes: one global manual evaluation control and collapsible subscription sections. Expanded sections show compact node cards with node name, protocol type, median latency, IP Score, and transport labels such as TCP, UDP, or X-UDP. There is no per-node detail expansion and no per-subscription evaluation control.
+4. Publish: a subscription-grouped node view of the current Publication Snapshot, plus the stable subscription link, publication status, and publication time.
+5. Settings: thresholds, retention, port, provider, test URLs, cache controls, browser runtime health, diagnostic mode, and other persisted configuration.
+6. Logs: operational and failure records for subscription refresh, node evaluation, scoring, publication, Mihomo, and the browser runtime.
 
-Accounts, complex charts, a theme marketplace, drag-and-drop workflow editing, and a general YAML editor are excluded.
+Accounts, complex charts, a theme marketplace, drag-and-drop workflow editing, a general YAML editor, and a dedicated Evaluation History page are excluded.
 
 ## 13. Mihomo isolation
 
@@ -180,6 +185,10 @@ Failure evidence is limited to the latest 20 provider failures and expires after
 - The Windows x64 package starts the local WebUI and bundled Mihomo core.
 - The package contains the pinned Managed Browser Runtime or reports an actionable runtime-unavailable error.
 - The system accepts up to 10 Clash/Mihomo YAML inputs and safely evaluates approximately 500 nodes.
+- The Overview page contains only the agreed summary metrics, subscription-link copy action, and Scoring Provider availability.
+- The Nodes page contains the only global manual evaluation control; the Overview and Subscriptions pages contain no evaluation controls, and no scheduled evaluation runs occur.
+- Subscriptions manage source metadata and manual refresh without displaying a separate import-validation result panel.
+- Nodes and Publish use collapsible subscription sections and compact node cards with protocol, median latency, IP Score, and transport labels.
 - Availability checks precede scoring and enforce the configured success, timeout, and latency rules.
 - The browser-backed IPSuper adapter can obtain and cache aggregate security scores when the website permits it, and degrades safely when it does not.
 - Browser scoring uses an isolated Context and the verified Browser Proxy Endpoint, with deterministic local fixture coverage and an explicit non-CI live smoke test.
@@ -198,3 +207,6 @@ Failure evidence is limited to the latest 20 provider failures and expires after
 - Windows service or automatic startup.
 - Automatic Mihomo or browser-runtime updates.
 - Automatic CAPTCHA solving or user-assisted challenge completion.
+- Scheduled or background evaluation.
+- Per-Subscription manual evaluation.
+- A dedicated Evaluation History page.
