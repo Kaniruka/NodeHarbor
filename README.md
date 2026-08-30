@@ -11,7 +11,7 @@ The WebUI can manage up to ten Upstream Subscriptions imported from a URL, uploa
 ## 使用方法
 
 1. 从 Windows 发布包中解压文件，运行 `nodeharbor.exe`。程序会启动本地管理页面并尝试自动打开浏览器；如果浏览器没有打开，请访问 <http://127.0.0.1:9876>。
-2. 打开“订阅”，添加订阅源。可以粘贴订阅 URL、上传 YAML 文件，或直接粘贴 YAML 内容。URL 订阅可选填写 User-Agent。
+2. 打开“订阅”，添加订阅源。可以粘贴订阅 URL、上传 YAML 文件，或直接粘贴 YAML 内容。URL 订阅可选填写 User-Agent；URL 返回的普通 Clash/Mihomo YAML、Base64 编码 YAML，以及常见的 Base64 `ss://`、`vmess://`、`vless://`、`trojan://` 节点列表都会自动处理。
 3. 打开“节点”，点击“开始评估”。程序会依次检查节点可用性、测速、获取出口 IP，并使用 IPSuper 评分。正在处理的节点会显示状态标签。
 4. 在“设置”中调整合格阈值、探测次数、超时、并发数和评分缓存期限。只有通过可用性检查且 IP Score 达到合格阈值的节点才会进入发布结果。
 5. 评估完成后，在“发布”或“概览”复制稳定订阅链接，并将它添加到 Clash/Mihomo 客户端：

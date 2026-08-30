@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +58,30 @@ func (upstream HTTPUpstream) FetchWithMetadata(ctx context.Context, request Upst
 	if len(document) > maximumUpstreamDocumentBytes {
 		return nil, UpstreamMetadata{}, errors.New("Upstream Subscription exceeds 10 MiB")
 	}
-	return document, parseUpstreamMetadata(response.Header.Get("subscription-userinfo")), nil
+	return decodeBase64SubscriptionDocument(document), parseUpstreamMetadata(response.Header.Get("subscription-userinfo")), nil
+}
+
+func decodeBase64SubscriptionDocument(document []byte) []byte {
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(document, []byte{0xef, 0xbb, 0xbf}))
+	if bytes.Contains(bytes.ToLower(trimmed), []byte("proxies:")) {
+		return document
+	}
+	compact := strings.Join(strings.Fields(string(trimmed)), "")
+	if compact == "" {
+		return document
+	}
+	encodings := []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
+	for _, encoding := range encodings {
+		decoded, err := encoding.DecodeString(compact)
+		if err != nil || len(bytes.TrimSpace(decoded)) == 0 {
+			continue
+		}
+		if converted, ok := proxyURIListToYAML(decoded); ok {
+			return converted
+		}
+		return decoded
+	}
+	return document
 }
 
 func parseUpstreamMetadata(header string) UpstreamMetadata {
