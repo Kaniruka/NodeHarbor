@@ -1,6 +1,6 @@
 # NodeHarbor
 
-当前发布版本：`0.3.0`
+当前发布版本：`0.3.1`
 
 NodeHarbor is a self-hosted Windows desktop tool for aggregating Clash/Mihomo subscriptions, checking node availability, evaluating exit-IP quality, and publishing a curated subscription.
 
@@ -51,8 +51,8 @@ The listener address and port can also be saved in the WebUI. They are persisted
 ## Build and verify the Windows package
 
 ```powershell
-.\scripts\package-windows.ps1 -Version 0.3.0
-Expand-Archive .\dist\NodeHarbor-windows-0.3.0.zip -DestinationPath .\dist\nodeharbor-package
+.\scripts\package-windows.ps1 -Version 0.3.1
+Expand-Archive .\dist\NodeHarbor-windows-0.3.1.zip -DestinationPath .\dist\nodeharbor-package
 .\scripts\smoke-windows.ps1 -PackageDirectory .\dist\nodeharbor-package
 ```
 
