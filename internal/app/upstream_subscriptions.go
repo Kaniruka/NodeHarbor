@@ -47,6 +47,10 @@ type upstreamSubscription struct {
 	RefreshStatus          upstreamRefreshStatus `json:"refreshStatus"`
 	LastError              string                `json:"lastError,omitempty"`
 	LastSuccessAt          string                `json:"lastSuccessAt,omitempty"`
+	RemainingTrafficBytes  *int64                `json:"remainingTrafficBytes,omitempty"`
+	TrafficTotalBytes      *int64                `json:"trafficTotalBytes,omitempty"`
+	TrafficUsedBytes       *int64                `json:"trafficUsedBytes,omitempty"`
+	ExpiresAt              string                `json:"expiresAt,omitempty"`
 	CreatedAt              string                `json:"createdAt"`
 	UpdatedAt              string                `json:"updatedAt"`
 }
@@ -80,6 +84,10 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 		refresh_status TEXT NOT NULL DEFAULT 'pending',
 		last_error TEXT NOT NULL DEFAULT '',
 		last_success_at TEXT NOT NULL DEFAULT '',
+		remaining_traffic_bytes INTEGER NOT NULL DEFAULT -1,
+		traffic_total_bytes INTEGER NOT NULL DEFAULT -1,
+		traffic_used_bytes INTEGER NOT NULL DEFAULT -1,
+		expires_at TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`, `CREATE TABLE IF NOT EXISTS proxy_nodes (
@@ -108,6 +116,16 @@ func (application *Application) initializeUpstreamSubscriptions(ctx context.Cont
 	}
 	if _, err := application.database.ExecContext(ctx, `ALTER TABLE proxy_nodes ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("migrate Proxy Node identity storage: %w", err)
+	}
+	for _, column := range []string{
+		"remaining_traffic_bytes INTEGER NOT NULL DEFAULT -1",
+		"traffic_total_bytes INTEGER NOT NULL DEFAULT -1",
+		"traffic_used_bytes INTEGER NOT NULL DEFAULT -1",
+		"expires_at TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := application.database.ExecContext(ctx, "ALTER TABLE upstream_subscriptions ADD COLUMN "+column); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate Upstream Subscription metadata: %w", err)
+		}
 	}
 	if err := application.migrateProxyNodeFingerprints(ctx); err != nil {
 		return err
@@ -225,6 +243,7 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 		return
 	}
 	var document []byte
+	metadata := UpstreamMetadata{}
 	var configuredDocument string
 	var acquisitionError error
 	if input.Kind == upstreamKindURL {
@@ -232,7 +251,7 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 			writeError(response, http.StatusBadRequest, errors.New("URL Upstream Subscription requires url"))
 			return
 		}
-		document, acquisitionError = application.dependencies.Upstream.Fetch(request.Context(), UpstreamRequest{Location: input.URL, UserAgent: input.UserAgent})
+		document, metadata, acquisitionError = application.fetchUpstreamDocument(request.Context(), UpstreamRequest{Location: input.URL, UserAgent: input.UserAgent})
 		if acquisitionError != nil {
 			writeError(response, http.StatusBadGateway, fmt.Errorf("fetch Upstream Subscription: %w", acquisitionError))
 			return
@@ -258,8 +277,8 @@ func (application *Application) handleCreateUpstreamSubscription(response http.R
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = application.database.ExecContext(request.Context(), `INSERT INTO upstream_subscriptions(
 		id, name, kind, url, user_agent, configured_document, last_successful_document, proxy_node_count, enabled,
-		refresh_status, last_success_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`, id, input.Name, input.Kind, input.URL, input.UserAgent, configuredDocument, document, proxyNodeCount, upstreamRefreshSuccess, now, now, now)
+		refresh_status, last_success_at, created_at, updated_at, remaining_traffic_bytes, traffic_total_bytes, traffic_used_bytes, expires_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, id, input.Name, input.Kind, input.URL, input.UserAgent, configuredDocument, document, proxyNodeCount, upstreamRefreshSuccess, now, now, now, metadataRemaining(metadata), metadata.TotalBytes, metadata.UploadBytes+metadata.DownloadBytes, metadata.ExpiresAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "at most 10 Upstream Subscriptions") {
 			writeError(response, http.StatusConflict, errors.New("at most 10 Upstream Subscriptions are allowed"))
@@ -392,19 +411,38 @@ func (application *Application) handleDeleteUpstreamSubscription(response http.R
 	response.WriteHeader(http.StatusNoContent)
 }
 
-func (application *Application) acquireUpstreamDocument(ctx context.Context, subscription upstreamSubscription) ([]byte, int, error) {
+func (application *Application) acquireUpstreamDocument(ctx context.Context, subscription upstreamSubscription) ([]byte, UpstreamMetadata, int, error) {
 	if subscription.Kind == upstreamKindURL {
-		document, err := application.dependencies.Upstream.Fetch(ctx, UpstreamRequest{Location: subscription.URL, UserAgent: subscription.UserAgent})
+		document, metadata, err := application.fetchUpstreamDocument(ctx, UpstreamRequest{Location: subscription.URL, UserAgent: subscription.UserAgent})
 		if err != nil {
-			return nil, http.StatusBadGateway, fmt.Errorf("fetch Upstream Subscription: %w", err)
+			return nil, UpstreamMetadata{}, http.StatusBadGateway, fmt.Errorf("fetch Upstream Subscription: %w", err)
 		}
-		return document, http.StatusOK, nil
+		return document, metadata, http.StatusOK, nil
 	}
-	return []byte(subscription.ConfiguredDocument), http.StatusOK, nil
+	return []byte(subscription.ConfiguredDocument), UpstreamMetadata{}, http.StatusOK, nil
+}
+
+func (application *Application) fetchUpstreamDocument(ctx context.Context, request UpstreamRequest) ([]byte, UpstreamMetadata, error) {
+	if upstream, ok := application.dependencies.Upstream.(MetadataUpstream); ok {
+		return upstream.FetchWithMetadata(ctx, request)
+	}
+	document, err := application.dependencies.Upstream.Fetch(ctx, request)
+	return document, UpstreamMetadata{}, err
+}
+
+func metadataRemaining(metadata UpstreamMetadata) int64 {
+	if metadata.TotalBytes <= 0 || metadata.DownloadBytes < 0 || metadata.UploadBytes < 0 {
+		return -1
+	}
+	remaining := metadata.TotalBytes - metadata.DownloadBytes - metadata.UploadBytes
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 func (application *Application) synchronizeUpstreamSubscription(ctx context.Context, subscription upstreamSubscription) (upstreamSubscription, int, error) {
-	document, status, err := application.acquireUpstreamDocument(ctx, subscription)
+	document, metadata, status, err := application.acquireUpstreamDocument(ctx, subscription)
 	if err != nil {
 		return application.recordUpstreamRefreshFailure(ctx, subscription, status, err)
 	}
@@ -415,9 +453,9 @@ func (application *Application) synchronizeUpstreamSubscription(ctx context.Cont
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = application.database.ExecContext(ctx, `UPDATE upstream_subscriptions SET
 		name = ?, url = ?, user_agent = ?, configured_document = ?, last_successful_document = ?,
-		proxy_node_count = ?, refresh_status = ?, last_error = '', last_success_at = ?, updated_at = ?
+		proxy_node_count = ?, refresh_status = ?, last_error = '', last_success_at = ?, updated_at = ?, remaining_traffic_bytes = ?, traffic_total_bytes = ?, traffic_used_bytes = ?, expires_at = ?
 		WHERE id = ?`, subscription.Name, subscription.URL, subscription.UserAgent, subscription.ConfiguredDocument,
-		document, proxyNodeCount, upstreamRefreshSuccess, now, now, subscription.ID)
+		document, proxyNodeCount, upstreamRefreshSuccess, now, now, metadataRemaining(metadata), metadata.TotalBytes, metadata.UploadBytes+metadata.DownloadBytes, metadata.ExpiresAt, subscription.ID)
 	if err != nil {
 		return upstreamSubscription{}, http.StatusInternalServerError, err
 	}
@@ -439,6 +477,7 @@ func (application *Application) recordUpstreamRefreshFailure(ctx context.Context
 	if err != nil {
 		return upstreamSubscription{}, http.StatusInternalServerError, err
 	}
+	application.logEvaluation(ctx, "", "error", fmt.Sprintf("subscription refresh failed: %s: %v", subscription.Name, refreshError))
 	return upstreamSubscription{}, status, refreshError
 }
 
@@ -864,7 +903,7 @@ func (application *Application) handleListProxyNodes(response http.ResponseWrite
 
 func (application *Application) listUpstreamSubscriptions(ctx context.Context) ([]upstreamSubscription, error) {
 	rows, err := application.database.QueryContext(ctx, `SELECT id, name, kind, url, user_agent, configured_document,
-		last_successful_document, proxy_node_count, enabled, refresh_status, last_error, last_success_at, created_at, updated_at
+		last_successful_document, proxy_node_count, enabled, refresh_status, last_error, last_success_at, created_at, updated_at, remaining_traffic_bytes, traffic_total_bytes, traffic_used_bytes, expires_at
 		FROM upstream_subscriptions ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -888,16 +927,26 @@ type rowScanner interface {
 func scanUpstreamSubscription(row rowScanner) (upstreamSubscription, error) {
 	var result upstreamSubscription
 	var enabled int
+	var remaining, total, used int64
 	err := row.Scan(&result.ID, &result.Name, &result.Kind, &result.URL, &result.UserAgent, &result.ConfiguredDocument,
 		&result.LastSuccessfulDocument, &result.ProxyNodeCount, &enabled, &result.RefreshStatus, &result.LastError,
-		&result.LastSuccessAt, &result.CreatedAt, &result.UpdatedAt)
+		&result.LastSuccessAt, &result.CreatedAt, &result.UpdatedAt, &remaining, &total, &used, &result.ExpiresAt)
 	result.Enabled = enabled != 0
+	if remaining >= 0 {
+		result.RemainingTrafficBytes = &remaining
+	}
+	if total >= 0 {
+		result.TrafficTotalBytes = &total
+	}
+	if used >= 0 {
+		result.TrafficUsedBytes = &used
+	}
 	return result, err
 }
 
 func (application *Application) getUpstreamSubscription(ctx context.Context, id string) (upstreamSubscription, error) {
 	row := application.database.QueryRowContext(ctx, `SELECT id, name, kind, url, user_agent, configured_document,
-		last_successful_document, proxy_node_count, enabled, refresh_status, last_error, last_success_at, created_at, updated_at
+		last_successful_document, proxy_node_count, enabled, refresh_status, last_error, last_success_at, created_at, updated_at, remaining_traffic_bytes, traffic_total_bytes, traffic_used_bytes, expires_at
 		FROM upstream_subscriptions WHERE id = ?`, id)
 	result, err := scanUpstreamSubscription(row)
 	if errors.Is(err, sql.ErrNoRows) {

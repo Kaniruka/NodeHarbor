@@ -48,10 +48,35 @@ type evaluationLog struct {
 	RunID     string `json:"runId,omitempty"`
 	Message   string `json:"message"`
 }
+
+type publicationNode struct {
+	NodeID           string         `json:"nodeId"`
+	SubscriptionID   string         `json:"subscriptionId"`
+	SubscriptionName string         `json:"subscriptionName"`
+	Name             string         `json:"name"`
+	Config           map[string]any `json:"config"`
+	MedianLatencyMS  float64        `json:"medianLatencyMs"`
+	IPScore          *float64       `json:"ipScore,omitempty"`
+	ScoreSource      string         `json:"scoreSource,omitempty"`
+}
+
+type publicationGroup struct {
+	SubscriptionID   string            `json:"subscriptionId"`
+	SubscriptionName string            `json:"subscriptionName"`
+	Nodes            []publicationNode `json:"nodes"`
+}
+
+type publicationResponse struct {
+	Status      string             `json:"status"`
+	PublishedAt string             `json:"publishedAt,omitempty"`
+	Groups      []publicationGroup `json:"groups"`
+}
 type evaluationNodeResult struct {
 	NodeID          string               `json:"nodeId"`
+	SourceID        string               `json:"sourceId"`
+	SourceName      string               `json:"sourceName"`
 	Name            string               `json:"name"`
-	Config          map[string]any       `json:"-"`
+	Config          map[string]any       `json:"config"`
 	State           string               `json:"state"`
 	Attempts        int                  `json:"attempts"`
 	Successful      int                  `json:"successful"`
@@ -319,6 +344,46 @@ func (application *Application) handleListLogs(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, logs)
 }
 
+func (application *Application) handlePublication(w http.ResponseWriter, r *http.Request) {
+	var publishedAt string
+	if err := application.database.QueryRowContext(r.Context(), `SELECT updated_at FROM publications WHERE id = 1`).Scan(&publishedAt); err != nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("publication snapshot unavailable"))
+		return
+	}
+	rows, err := application.database.QueryContext(r.Context(), `SELECT node_id, subscription_id, subscription_name, name, config, median_latency_ms, ip_score, score_source FROM publication_nodes WHERE snapshot_id = 1 ORDER BY subscription_name, name, node_id`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer rows.Close()
+	groups := make([]publicationGroup, 0)
+	groupIndex := make(map[string]int)
+	for rows.Next() {
+		var item publicationNode
+		var config []byte
+		if err := rows.Scan(&item.NodeID, &item.SubscriptionID, &item.SubscriptionName, &item.Name, &config, &item.MedianLatencyMS, &item.IPScore, &item.ScoreSource); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if err := yaml.Unmarshal(config, &item.Config); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		index, exists := groupIndex[item.SubscriptionID]
+		if !exists {
+			index = len(groups)
+			groupIndex[item.SubscriptionID] = index
+			groups = append(groups, publicationGroup{SubscriptionID: item.SubscriptionID, SubscriptionName: item.SubscriptionName, Nodes: make([]publicationNode, 0)})
+		}
+		groups[index].Nodes = append(groups[index].Nodes, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, publicationResponse{Status: "published", PublishedAt: publishedAt, Groups: groups})
+}
+
 func (application *Application) logEvaluation(ctx context.Context, runID, level, message string) {
 	_, _ = application.database.ExecContext(ctx, `INSERT INTO evaluation_logs(run_id, timestamp, level, message) VALUES (?, ?, ?, ?)`, runID, application.clock.Now().UTC().Format(time.RFC3339Nano), level, message)
 }
@@ -473,12 +538,14 @@ func (application *Application) runResponse(ctx context.Context, run evaluationR
 		}
 		result.DurationMS = end.Sub(started).Seconds() * 1000
 	}
-	rows, err := application.database.QueryContext(ctx, `SELECT node_id, name, state, attempts, successful, median_latency_ms, exit_identity, address_family, ip_score, score_source, reason, availability_status, availability_reason, exit_identity_status, exit_identity_reason, ip_score_status, ip_score_reason FROM evaluation_results WHERE run_id = ? ORDER BY name`, run.ID)
+	rows, err := application.database.QueryContext(ctx, `SELECT r.node_id, p.subscription_id, s.name, r.name, r.state, r.attempts, r.successful, r.median_latency_ms, r.exit_identity, r.address_family, r.ip_score, r.score_source, r.reason, r.config, r.availability_status, r.availability_reason, r.exit_identity_status, r.exit_identity_reason, r.ip_score_status, r.ip_score_reason FROM evaluation_results r JOIN proxy_nodes p ON p.id = r.node_id JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE r.run_id = ? ORDER BY r.name`, run.ID)
 	if err == nil {
 		for rows.Next() {
 			var item evaluationNodeResult
+			var config []byte
 			var availabilityStatus, availabilityReason, exitIdentityStatus, exitIdentityReason, ipScoreStatus, ipScoreReason string
-			if rows.Scan(&item.NodeID, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason, &availabilityStatus, &availabilityReason, &exitIdentityStatus, &exitIdentityReason, &ipScoreStatus, &ipScoreReason) == nil {
+			if rows.Scan(&item.NodeID, &item.SourceID, &item.SourceName, &item.Name, &item.State, &item.Attempts, &item.Successful, &item.MedianLatencyMS, &item.ExitIdentity, &item.AddressFamily, &item.IPScore, &item.ScoreSource, &item.Reason, &config, &availabilityStatus, &availabilityReason, &exitIdentityStatus, &exitIdentityReason, &ipScoreStatus, &ipScoreReason) == nil {
+				_ = yaml.Unmarshal(config, &item.Config)
 				item.Stages = evaluationNodeStages{
 					Availability: evaluationNodeStage{Status: availabilityStatus, Reason: availabilityReason},
 					ExitIdentity: evaluationNodeStage{Status: exitIdentityStatus, Reason: exitIdentityReason},
@@ -650,6 +717,9 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("store Evaluation Result: %w", err))
 			return
 		}
+		if item.State != "passed" {
+			application.logNodeEvaluationFailure(ctx, id, item)
+		}
 		if item.State == "passed" {
 			passed++
 		} else {
@@ -680,6 +750,7 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
 		application.beginEvaluationPhase(ctx, id, "publication")
 		if err := application.publishQualifiedNodes(runContext, id); err != nil {
+			application.logEvaluation(ctx, id, "error", "publication failed: "+err.Error())
 			application.setPublicationResult(ctx, id, "failed")
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
 			return
@@ -791,30 +862,6 @@ func (application *Application) pauseEvaluationAtPhase(ctx context.Context, id, 
 	application.pauseEvaluationRun(ctx, id, reason)
 }
 
-func (application *Application) runScheduler() {
-	for {
-		minutes := 360
-		_ = application.database.QueryRowContext(application.lifecycleCtx, `SELECT value FROM settings WHERE key = 'evaluation_interval_minutes'`).Scan(&minutes)
-		if minutes <= 0 {
-			select {
-			case <-application.lifecycleCtx.Done():
-				return
-			case <-application.scheduleWake:
-				continue
-			}
-		}
-		timer := application.clock.After(time.Duration(minutes) * time.Minute)
-		select {
-		case <-application.lifecycleCtx.Done():
-			return
-		case <-application.scheduleWake:
-			continue
-		case <-timer:
-			_, _, _ = application.startEvaluationRun(application.lifecycleCtx, false, "scheduled")
-		}
-	}
-}
-
 func (application *Application) cleanupEvaluationHistory(ctx context.Context) {
 	days := 7
 	_ = application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'history_retention_days'`).Scan(&days)
@@ -830,15 +877,24 @@ func (application *Application) cleanupEvaluationHistory(ctx context.Context) {
 }
 
 func (application *Application) publishQualifiedNodes(ctx context.Context, runID string) error {
-	rows, err := application.database.QueryContext(ctx, `SELECT r.config FROM evaluation_results r WHERE r.run_id = ? AND r.state = 'passed' ORDER BY r.name`, runID)
+	rows, err := application.database.QueryContext(ctx, `SELECT r.node_id, r.name, r.config, r.median_latency_ms, r.ip_score, r.score_source, p.subscription_id, s.name FROM evaluation_results r JOIN proxy_nodes p ON p.id = r.node_id JOIN upstream_subscriptions s ON s.id = p.subscription_id WHERE r.run_id = ? AND r.state = 'passed' ORDER BY r.name`, runID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	proxies := make([]map[string]any, 0)
+	type snapshotNode struct {
+		nodeID, name, subscriptionID, subscriptionName string
+		config                                         []byte
+		latency                                        float64
+		score                                          *float64
+		source                                         string
+	}
+	snapshotNodes := make([]snapshotNode, 0)
 	for rows.Next() {
+		var item snapshotNode
 		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		if err := rows.Scan(&item.nodeID, &item.name, &data, &item.latency, &item.score, &item.source, &item.subscriptionID, &item.subscriptionName); err != nil {
 			return err
 		}
 		if len(data) == 0 {
@@ -849,6 +905,8 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 			return err
 		}
 		proxies = append(proxies, config)
+		item.config = append([]byte(nil), data...)
+		snapshotNodes = append(snapshotNodes, item)
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -879,6 +937,14 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 	if _, err := transaction.ExecContext(ctx, `INSERT INTO publications(id, document, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`, document, application.clock.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM publication_nodes WHERE snapshot_id = 1`); err != nil {
+		return err
+	}
+	for _, item := range snapshotNodes {
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO publication_nodes(snapshot_id, node_id, subscription_id, subscription_name, name, config, median_latency_ms, ip_score, score_source) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`, item.nodeID, item.subscriptionID, item.subscriptionName, item.name, item.config, item.latency, item.score, item.source); err != nil {
+			return err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -901,9 +967,23 @@ func (application *Application) finishEvaluationRun(ctx context.Context, id stri
 	if runErr != nil {
 		status = "failed"
 		reason = runErr.Error()
+		application.logEvaluation(ctx, id, "error", "evaluation failed: "+reason)
 	}
 	application.finishRunningPhases(ctx, id, status, reason)
 	application.writeEvaluationRunResult(ctx, id, total, passed, failed, status, reason)
+}
+
+func (application *Application) logNodeEvaluationFailure(ctx context.Context, runID string, result evaluationNodeResult) {
+	message := "node evaluation failed"
+	switch {
+	case strings.HasPrefix(result.Reason, "runtime_unavailable:"):
+		message = "browser runtime failed"
+	case result.Stages.IPScore.Status == "unavailable" || strings.HasPrefix(result.Reason, "provider_unavailable:") || strings.HasPrefix(result.Reason, "score_unavailable:"):
+		message = "scoring failed"
+	case result.Stages.Availability.Status == "failed" || result.Stages.ExitIdentity.Status == "failed":
+		message = "Mihomo node evaluation failed"
+	}
+	application.logEvaluation(ctx, runID, "error", fmt.Sprintf("%s: %s: %s", message, result.Name, result.Reason))
 }
 
 func (application *Application) completeEvaluationRunWithReason(ctx context.Context, id string, total, passed, failed int, reason string) {

@@ -152,6 +152,10 @@ type BrowserRuntime interface {
 	Close() error
 }
 
+type BrowserRuntimeDiagnostics interface {
+	DiagnosticsMode() string
+}
+
 type BrowserRuntimeTextWait interface {
 	FetchUntilText(context.Context, string, []string, []string) ([]BrowserPage, error)
 }
@@ -169,6 +173,19 @@ type UpstreamRequest struct {
 
 type Upstream interface {
 	Fetch(context.Context, UpstreamRequest) ([]byte, error)
+}
+
+// UpstreamMetadata is provider-reported quota and expiry information. A zero
+// value means that the upstream did not report that field.
+type UpstreamMetadata struct {
+	UploadBytes   int64
+	DownloadBytes int64
+	TotalBytes    int64
+	ExpiresAt     string
+}
+
+type MetadataUpstream interface {
+	FetchWithMetadata(context.Context, UpstreamRequest) ([]byte, UpstreamMetadata, error)
 }
 
 type ScoringProvider interface {
@@ -212,8 +229,7 @@ type Application struct {
 	pendingTrigger     string
 	closed             bool
 	lifecycleCtx       context.Context
-	stopScheduler      context.CancelFunc
-	scheduleWake       chan struct{}
+	stopLifecycle      context.CancelFunc
 	clock              Clock
 	listenerMu         sync.RWMutex
 	listenerError      string
@@ -236,6 +252,7 @@ type settingsResponse struct {
 	InstallationID                string                  `json:"installationId"`
 	ScoringProvider               string                  `json:"scoringProvider"`
 	IPSuperThreshold              int                     `json:"ipsuperThreshold"`
+	IPSuperEnabled                bool                    `json:"ipsuperEnabled"`
 	EvaluationIntervalMinutes     int                     `json:"evaluationIntervalMinutes"`
 	HistoryRetentionDays          int                     `json:"historyRetentionDays"`
 	AvailabilityAttempts          int                     `json:"availabilityAttempts"`
@@ -253,6 +270,8 @@ type settingsResponse struct {
 	LANSubscriptionURLs           []string                `json:"lanSubscriptionURLs"`
 	ListenerError                 string                  `json:"listenerError,omitempty"`
 	ScoringProviders              []scoringProviderStatus `json:"scoringProviders"`
+	BrowserRuntimeStatus          string                  `json:"browserRuntimeStatus"`
+	BrowserDiagnosticMode         string                  `json:"browserDiagnosticMode"`
 }
 
 type scoringProviderStatus struct {
@@ -281,12 +300,12 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Appli
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	lifecycleCtx, stopScheduler := context.WithCancel(context.Background())
+	lifecycleCtx, stopLifecycle := context.WithCancel(context.Background())
 	clock := config.Clock
 	if clock == nil {
 		clock = systemClock{}
 	}
-	application := &Application{database: database, dependencies: dependencies, lifecycleCtx: lifecycleCtx, stopScheduler: stopScheduler, scheduleWake: make(chan struct{}, 1), clock: clock}
+	application := &Application{database: database, dependencies: dependencies, lifecycleCtx: lifecycleCtx, stopLifecycle: stopLifecycle, clock: clock}
 	if err := application.initialize(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -338,8 +357,8 @@ func (application *Application) ListenerError() string {
 }
 
 func (application *Application) Close() error {
-	if application.stopScheduler != nil {
-		application.stopScheduler()
+	if application.stopLifecycle != nil {
+		application.stopLifecycle()
 	}
 	application.evaluationMu.Lock()
 	application.closed = true
@@ -360,6 +379,7 @@ func (application *Application) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS publications (id INTEGER PRIMARY KEY CHECK (id = 1), document BLOB NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS publication_nodes (snapshot_id INTEGER NOT NULL DEFAULT 1, node_id TEXT NOT NULL, subscription_id TEXT NOT NULL, subscription_name TEXT NOT NULL, name TEXT NOT NULL, config BLOB NOT NULL, median_latency_ms REAL NOT NULL DEFAULT 0, ip_score REAL, score_source TEXT NOT NULL DEFAULT '', PRIMARY KEY(snapshot_id, node_id))`,
 	}
 	for _, statement := range statements {
 		if _, err := application.database.ExecContext(ctx, statement); err != nil {
@@ -409,7 +429,6 @@ func (application *Application) initialize(ctx context.Context) error {
 	if err := application.initializeEvaluationRuns(ctx); err != nil {
 		return err
 	}
-	go application.runScheduler()
 	return application.ensureInitialPublication(ctx)
 }
 
@@ -470,6 +489,7 @@ func (application *Application) routes(config Config) http.Handler {
 	mux.HandleFunc("PUT /api/settings", application.handlePutSettings)
 	mux.HandleFunc("GET /api/settings/export", application.handleExportSettings)
 	mux.HandleFunc("GET /api/logs", application.handleListLogs)
+	mux.HandleFunc("GET /api/publication", application.handlePublication)
 	mux.HandleFunc("GET /sub/clash.yaml", application.handlePublishedSubscription)
 	application.registerUpstreamSubscriptionRoutes(mux)
 	application.registerEvaluationRoutes(mux)
@@ -677,10 +697,6 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			return
 		}
 	}
-	select {
-	case application.scheduleWake <- struct{}{}:
-	default:
-	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
@@ -698,6 +714,11 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipsuper_threshold'`).Scan(&result.IPSuperThreshold); err != nil {
 		return result, err
 	}
+	var enabled string
+	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipsuper_enabled'`).Scan(&enabled); err != nil {
+		return result, err
+	}
+	result.IPSuperEnabled = enabled == "1" || strings.EqualFold(enabled, "true")
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'evaluation_interval_minutes'`).Scan(&result.EvaluationIntervalMinutes); err != nil {
 		return result, err
 	}
@@ -740,6 +761,14 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	}
 	result.LocalSubscriptionURL = publishedSubscriptionURL("127.0.0.1", result.ListenPort)
 	result.LANSubscriptionURLs = lanSubscriptionURLs(result.ListenAddress, result.ListenPort)
+	result.BrowserRuntimeStatus = "unavailable"
+	result.BrowserDiagnosticMode = "headless"
+	if application.dependencies.BrowserRuntime != nil {
+		result.BrowserRuntimeStatus = "available"
+		if diagnostics, ok := application.dependencies.BrowserRuntime.(BrowserRuntimeDiagnostics); ok && diagnostics.DiagnosticsMode() != "" {
+			result.BrowserDiagnosticMode = diagnostics.DiagnosticsMode()
+		}
+	}
 	providerStatuses, err := application.readScoringProviderStatuses(ctx)
 	if err != nil {
 		return result, err

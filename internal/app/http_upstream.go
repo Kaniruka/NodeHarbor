@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,13 +23,18 @@ func NewHTTPUpstream(timeout time.Duration) HTTPUpstream {
 }
 
 func (upstream HTTPUpstream) Fetch(ctx context.Context, request UpstreamRequest) ([]byte, error) {
+	document, _, err := upstream.FetchWithMetadata(ctx, request)
+	return document, err
+}
+
+func (upstream HTTPUpstream) FetchWithMetadata(ctx context.Context, request UpstreamRequest) ([]byte, UpstreamMetadata, error) {
 	location, err := url.Parse(request.Location)
 	if err != nil || (location.Scheme != "http" && location.Scheme != "https") || location.Host == "" {
-		return nil, errors.New("Upstream Subscription URL must use http or https")
+		return nil, UpstreamMetadata{}, errors.New("Upstream Subscription URL must use http or https")
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, request.Location, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create Upstream Subscription request: %w", err)
+		return nil, UpstreamMetadata{}, fmt.Errorf("create Upstream Subscription request: %w", err)
 	}
 	if request.UserAgent != "" {
 		httpRequest.Header.Set("User-Agent", request.UserAgent)
@@ -36,18 +43,43 @@ func (upstream HTTPUpstream) Fetch(ctx context.Context, request UpstreamRequest)
 	}
 	response, err := upstream.client.Do(httpRequest)
 	if err != nil {
-		return nil, err
+		return nil, UpstreamMetadata{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("Upstream Subscription returned HTTP %d", response.StatusCode)
+		return nil, UpstreamMetadata{}, fmt.Errorf("Upstream Subscription returned HTTP %d", response.StatusCode)
 	}
 	document, err := io.ReadAll(io.LimitReader(response.Body, maximumUpstreamDocumentBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, UpstreamMetadata{}, err
 	}
 	if len(document) > maximumUpstreamDocumentBytes {
-		return nil, errors.New("Upstream Subscription exceeds 10 MiB")
+		return nil, UpstreamMetadata{}, errors.New("Upstream Subscription exceeds 10 MiB")
 	}
-	return document, nil
+	return document, parseUpstreamMetadata(response.Header.Get("subscription-userinfo")), nil
+}
+
+func parseUpstreamMetadata(header string) UpstreamMetadata {
+	var metadata UpstreamMetadata
+	for _, part := range strings.Split(header, ";") {
+		pieces := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(pieces) != 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(strings.TrimSpace(pieces[1]), 10, 64)
+		if err != nil || value < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(pieces[0])) {
+		case "upload":
+			metadata.UploadBytes = value
+		case "download":
+			metadata.DownloadBytes = value
+		case "total":
+			metadata.TotalBytes = value
+		case "expire":
+			metadata.ExpiresAt = time.Unix(value, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	return metadata
 }

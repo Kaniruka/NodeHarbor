@@ -221,7 +221,7 @@ func TestRunPolicyAndEvaluationHistoryAreExposedThroughManagementAPI(t *testing.
 	_ = logsResponse.Body.Close()
 }
 
-func TestSchedulerIsDisabledByZeroAndUsesUpdatedIntervalWithoutRestart(t *testing.T) {
+func TestEvaluationDoesNotStartAutomatically(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC))
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="root"></div>`)}}
 	instance, err := app.Open(context.Background(), app.Config{DatabasePath: filepath.Join(t.TempDir(), "nodeharbor.db"), WebAssets: fs.FS(assets), Clock: clock}, app.Dependencies{Upstream: unavailableUpstream{}, Scoring: unavailableScoring{}, Kernel: &recordingKernel{}, TestChannel: unavailableTestChannel{}})
@@ -232,32 +232,14 @@ func TestSchedulerIsDisabledByZeroAndUsesUpdatedIntervalWithoutRestart(t *testin
 	server := httptest.NewServer(instance.Handler())
 	t.Cleanup(server.Close)
 
-	clock.waitForTimerCount(t, 1)
-	putJSON(t, server.URL+"/api/settings", map[string]any{"evaluationIntervalMinutes": 0})
-	time.Sleep(20 * time.Millisecond)
+	putJSON(t, server.URL+"/api/settings", map[string]any{"evaluationIntervalMinutes": 1})
+	time.Sleep(50 * time.Millisecond)
 	var current struct {
 		Status string `json:"status"`
 	}
 	getJSON(t, server.URL+"/api/evaluation-runs/current", &current)
 	if current.Status != "idle" {
-		t.Fatalf("disabled schedule started a run: %+v", current)
-	}
-
-	putJSON(t, server.URL+"/api/settings", map[string]any{"evaluationIntervalMinutes": 1})
-	clock.waitForTimerCount(t, 2)
-	clock.fireLatest()
-	var history []struct {
-		Trigger string `json:"trigger"`
-	}
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		getJSON(t, server.URL+"/api/evaluation-runs", &history)
-		if len(history) > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(history) == 0 || history[0].Trigger != "scheduled" {
-		t.Fatalf("scheduled history = %+v", history)
+		t.Fatalf("evaluation started without a manual request: %+v", current)
 	}
 }
 

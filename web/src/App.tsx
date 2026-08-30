@@ -1,469 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
-import UpstreamSubscriptions from "./UpstreamSubscriptions";
+import UpstreamSubscriptions, { UpstreamSubscription } from "./UpstreamSubscriptions";
 
 type Locale = "zh-CN" | "en";
-type HealthState = "loading" | "healthy" | "unhealthy";
-
-type Health = {
-  status: HealthState;
-  backend: { status: HealthState };
-  database: { status: HealthState };
-  publishedSubscription: { status: HealthState };
-};
-
-type ListenerSettings = {
-  listenAddress?: string;
-  listenPort?: number;
-  localSubscriptionURL?: string;
-  subscriptionURL?: string;
-  lanSubscriptionURLs?: string[];
-  listenerError?: string;
-};
+type Page = "overview" | "subscriptions" | "nodes" | "publish" | "settings" | "logs";
+type Settings = { language?: Locale; subscriptionURL?: string; localSubscriptionURL?: string; [key: string]: any };
+type Stage = { status?: string; reason?: string };
+type EvaluationResult = { nodeId?: string; sourceId?: string; sourceName?: string; name: string; config?: Record<string, any>; state: string; medianLatencyMs?: number; ipScore?: number; scoreSource?: string; reason?: string; stages?: { availability?: Stage; exitIdentity?: Stage; ipScore?: Stage } };
+type EvaluationRun = { status: string; startedAt?: string; finishedAt?: string; total: number; passed: number; failed: number; publicationResult?: string; results: EvaluationResult[] };
+type Node = { id?: string; name: string; originalName?: string; config?: Record<string, any>; state?: string };
+type Publication = { status: string; publishedAt?: string; groups: Array<{ subscriptionId: string; subscriptionName: string; nodes: Array<{ nodeId: string; name: string; config?: Record<string, any>; medianLatencyMs?: number; ipScore?: number; scoreSource?: string }> }> };
 
 const messages = {
-  "zh-CN": {
-    eyebrow: "本地代理订阅管家",
-    title: "NodeHarbor 控制台",
-    subtitle: "从这里确认系统已准备好安全地整理与发布代理订阅。",
-    health: "系统健康",
-    healthHint: "实时检查本地服务的关键环节",
-    backend: "后端",
-    database: "数据库",
-    publication: "已发布订阅",
-    healthy: "健康",
-    unhealthy: "异常",
-    loading: "检查中",
-    subscription: "订阅地址",
-    subscriptionHint: "即使尚无代理节点，该地址也始终提供有效配置。",
-    localSubscription: "本地订阅地址",
-    currentSubscription: "当前访问入口",
-    lanSubscriptions: "局域网订阅地址",
-    noLanSubscriptions: "当前监听地址未提供可识别的 LAN 地址。",
-    listener: "监听诊断",
-    listenerHint: "管理路由仅接受回环请求；Published Subscription 可按监听地址提供给可信局域网。",
-    copy: "复制地址",
-    copied: "已复制",
-    language: "语言",
-    switchLanguage: "English",
-    loadError: "无法读取系统健康状态，请确认后端正在运行。",
-    evaluation: "评估运行",
-    startEvaluation: "开始评估",
-    ignoreCache: "本轮忽略评分缓存",
-    scoreCache: "复用 24 小时内缓存评分",
-    scoreProvider: "本轮请求评分源",
-    running: "运行中",
-    completed: "已完成",
-    failed: "失败",
-    paused: "已暂停",
-    idle: "尚未运行",
-    summary: (passed: number, total: number) => `${passed} / ${total} 个节点通过`,
-    provider: "评分源",
-    threshold: "合格阈值",
-    ipsuperThreshold: "IPSuper 合格阈值",
-    ipsuper: "IPSuper",
-    providerReady: "可用",
-    providerUnavailable: "不可用",
-    providerUnverified: "未验证",
-    providerDisabled: "已禁用",
-    availabilityStage: "可用性检查",
-    exitIdentityStage: "出口身份",
-    ipScoreStage: "IP 评分",
-    stagePending: "待处理",
-    stageRunning: "处理中",
-    stagePassed: "已通过",
-    stageFailed: "失败",
-    stageUnavailable: "不可用",
-    saveSettings: "保存评分设置",
-    interval: "自动运行间隔（分钟）",
-    retention: "历史保留天数",
-    availabilityAttempts: "探测次数",
-    availabilityRequired: "最低成功次数",
-    availabilityTimeout: "单次超时（秒）",
-    availabilityMaxLatency: "最大中位延迟（毫秒）",
-    availabilityURLs: "探测地址（逗号分隔）",
-    evaluationWorkers: "并发节点数",
-    scoringJitter: "评分抖动上限（毫秒）",
-    saveAvailabilitySettings: "保存可用性设置",
-    probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} 次探测成功`,
-    history: "运行历史",
-    historyHint: "查看保留窗口内的 Evaluation Run 和诊断信息",
-    exportConfig: "导出配置 JSON",
-    trigger: "触发",
-    phase: "阶段",
-    duration: "耗时",
-    publicationResult: "发布结果",
-    failureSummary: "失败摘要",
-    published: "已发布",
-    retained: "保留上一版本",
-    publicationRetained: "评分源失败，已保留上一版已发布订阅",
-    notAttempted: "未尝试",
-    logs: "日志与诊断",
-    cacheTTL: "评分缓存期限（分钟）",
-    listenPort: "管理端口",
-    listenAddress: "监听地址",
-    restartRequired: "监听配置将在 NodeHarbor 重启后生效。",
-  },
-  en: {
-    eyebrow: "Local proxy subscription curator",
-    title: "NodeHarbor console",
-    subtitle: "Confirm that the system is ready to curate and publish proxy subscriptions safely.",
-    health: "System health",
-    healthHint: "Live checks for each critical part of the local system",
-    backend: "Backend",
-    database: "Database",
-    publication: "Published Subscription",
-    healthy: "Healthy",
-    unhealthy: "Unavailable",
-    loading: "Checking",
-    subscription: "Subscription URL",
-    subscriptionHint: "This address always serves a valid configuration, even with no Proxy Nodes.",
-    localSubscription: "Local subscription URL",
-    currentSubscription: "Current access URL",
-    lanSubscriptions: "LAN subscription URLs",
-    noLanSubscriptions: "No LAN address is currently available for this listener.",
-    listener: "Listener diagnostics",
-    listenerHint: "Management routes accept loopback requests only; the Published Subscription follows the configured listener address.",
-    copy: "Copy URL",
-    copied: "Copied",
-    language: "Language",
-    switchLanguage: "简体中文",
-    loadError: "System health could not be loaded. Confirm that the backend is running.",
-    evaluation: "Evaluation Run",
-    startEvaluation: "Start evaluation",
-    ignoreCache: "Ignore score cache for this run",
-    scoreCache: "Reused score cache within 24 hours",
-    scoreProvider: "Requested from scoring provider",
-    running: "Running",
-    completed: "Completed",
-    failed: "Failed",
-    paused: "Paused",
-    idle: "Not run yet",
-    summary: (passed: number, total: number) => `${passed} / ${total} Proxy Nodes passed`,
-    provider: "Scoring Provider",
-    threshold: "Pass threshold",
-    ipsuperThreshold: "IPSuper pass threshold",
-    ipsuper: "IPSuper",
-    providerReady: "Available",
-    providerUnavailable: "Unavailable",
-    providerUnverified: "Unverified",
-    providerDisabled: "Disabled",
-    availabilityStage: "Availability Check",
-    exitIdentityStage: "Exit Identity",
-    ipScoreStage: "IP Score",
-    stagePending: "Pending",
-    stageRunning: "Running",
-    stagePassed: "Passed",
-    stageFailed: "Failed",
-    stageUnavailable: "Unavailable",
-    saveSettings: "Save scoring settings",
-    interval: "Automatic interval (minutes)",
-    retention: "History retention (days)",
-    availabilityAttempts: "Probe attempts",
-    availabilityRequired: "Required successes",
-    availabilityTimeout: "Attempt timeout (seconds)",
-    availabilityMaxLatency: "Maximum median latency (ms)",
-    availabilityURLs: "Probe URLs (comma-separated)",
-    evaluationWorkers: "Concurrent Proxy Nodes",
-    scoringJitter: "Scoring jitter limit (ms)",
-    saveAvailabilitySettings: "Save Availability Check settings",
-    probeSuccess: (successful: number, attempts: number) => `${successful} / ${attempts} probes succeeded`,
-    history: "History",
-    historyHint: "Retained Evaluation Runs and diagnostics",
-    exportConfig: "Export configuration JSON",
-    trigger: "Trigger",
-    phase: "Phase",
-    duration: "Duration",
-    publicationResult: "Publication",
-    failureSummary: "Failure summary",
-    published: "published",
-    retained: "previous snapshot retained",
-    publicationRetained: "Scoring provider failed; previous Published Subscription retained",
-    notAttempted: "not attempted",
-    logs: "Logs and diagnostics",
-    cacheTTL: "Score cache TTL (minutes)",
-    listenPort: "Management port",
-    listenAddress: "Listen address",
-    restartRequired: "Listener changes take effect after restarting NodeHarbor.",
-  },
+  "zh-CN": { brand: "NodeHarbor", overview: "概览", subscriptions: "订阅", nodes: "节点", publish: "发布", settings: "设置", logs: "日志", switchLanguage: "English", eyebrow: "本地代理订阅管家", overviewHint: "查看当前整理结果和发布状态", subscriptionCount: "订阅数量", latestEvaluation: "最近一次评估", totalNodes: "节点总数", availableNodes: "可用节点", qualifiedNodes: "达标节点", never: "尚未评估", copy: "复制稳定订阅链接", copied: "已复制", scoringProvider: "评分服务", provider: "评分服务", providerEnabled: "启用 IPSuper", browserRuntime: "浏览器运行时", diagnosticMode: "诊断模式", available: "可用", unavailable: "不可用", unverified: "未验证", noSubscriptions: "暂无订阅", evaluation: "评估运行", startEvaluation: "开始评估", running: "运行中", completed: "已完成", failed: "失败", retained: "保留上一版", published: "已发布", idle: "尚未运行", refresh: "刷新", collapseHint: "展开或收起订阅", protocol: "协议", latency: "中位延迟", score: "IP Score", transport: "传输", cached: "缓存评分", providerScore: "评分服务", noNodes: "暂无节点结果", publication: "Publication Snapshot", publicationHint: "当前已发布快照中的节点", publicationTime: "发布时间", status: "状态", noPublication: "暂无已发布节点", save: "保存设置", saved: "已保存", export: "导出配置 JSON", threshold: "IPSuper 合格阈值", retention: "日志保留天数", attempts: "探测次数", required: "最低成功次数", timeout: "单次超时（秒）", maxLatency: "最大中位延迟（毫秒）", urls: "探测地址（逗号分隔）", workers: "并发节点数", jitter: "评分抖动上限（毫秒）", cacheTTL: "评分缓存期限（分钟）", listenAddress: "监听地址", listenPort: "监听端口", restart: "监听配置将在重启后生效。", logsHint: "评估、订阅、评分、发布和运行时诊断", emptyLogs: "暂无日志", level: "级别", source: "来源", unknown: "未知", noProvider: "未验证", availableCount: (a: number, t: number) => `${a} / ${t}`, scoreValue: (v: number) => Number.isFinite(v) ? v.toFixed(0) : "—", latencyValue: (v: number | undefined) => typeof v === "number" && v > 0 ? `${Math.round(v)} ms` : "—" },
+  en: { brand: "NodeHarbor", overview: "Overview", subscriptions: "Subscriptions", nodes: "Nodes", publish: "Publish", settings: "Settings", logs: "Logs", switchLanguage: "简体中文", eyebrow: "Local proxy subscription curator", overviewHint: "See the current curation result and publication state", subscriptionCount: "Subscriptions", latestEvaluation: "Latest Evaluation Run", totalNodes: "Total nodes", availableNodes: "Available nodes", qualifiedNodes: "Qualified nodes", never: "Not evaluated yet", copy: "Copy stable subscription link", copied: "Copied", scoringProvider: "Scoring Provider", provider: "Scoring provider", providerEnabled: "Enable IPSuper", browserRuntime: "Browser runtime", diagnosticMode: "Diagnostic mode", available: "Available", unavailable: "Unavailable", unverified: "Unverified", noSubscriptions: "No subscriptions", evaluation: "Evaluation Run", startEvaluation: "Start evaluation", running: "Running", completed: "Completed", failed: "Failed", retained: "Previous snapshot retained", published: "Published", idle: "Not run yet", refresh: "Refresh", collapseHint: "Expand or collapse subscription", protocol: "Protocol", latency: "Median latency", score: "IP Score", transport: "Transport", cached: "Cached score", providerScore: "Scoring provider", noNodes: "No node results", publication: "Publication Snapshot", publicationHint: "Nodes in the current published snapshot", publicationTime: "Published at", status: "Status", noPublication: "No published nodes", save: "Save settings", saved: "Saved", export: "Export configuration JSON", threshold: "IPSuper pass threshold", retention: "Log retention (days)", attempts: "Probe attempts", required: "Required successes", timeout: "Attempt timeout (seconds)", maxLatency: "Maximum median latency (ms)", urls: "Probe URLs (comma-separated)", workers: "Concurrent nodes", jitter: "Scoring jitter limit (ms)", cacheTTL: "Score cache TTL (minutes)", listenAddress: "Listen address", listenPort: "Listen port", restart: "Listener changes take effect after restart.", logsHint: "Evaluation, subscription, scoring, publication, and runtime diagnostics", emptyLogs: "No logs", level: "Level", source: "Source", unknown: "Unknown", noProvider: "Unverified", availableCount: (a: number, t: number) => `${a} / ${t}`, scoreValue: (v: number) => Number.isFinite(v) ? v.toFixed(0) : "—", latencyValue: (v: number | undefined) => typeof v === "number" && v > 0 ? `${Math.round(v)} ms` : "—" },
 } as const;
-
-const initialHealth: Health = {
-  status: "loading",
-  backend: { status: "loading" },
-  database: { status: "loading" },
-  publishedSubscription: { status: "loading" },
-};
+type Text = (typeof messages)[Locale];
 
 export default function App() {
   const [locale, setLocale] = useState<Locale>(browserLocale());
-  const [health, setHealth] = useState<Health>(initialHealth);
-  const [listener, setListener] = useState<ListenerSettings | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [page, setPage] = useState<Page>(readPage());
   const [loadFailed, setLoadFailed] = useState(false);
-  const [copied, setCopied] = useState(false);
   const text = messages[locale];
 
-  useEffect(() => {
-    let active = true;
-    Promise.all([
-      fetch("/api/settings").then((response) => requireOK(response).json()),
-      fetch("/api/health").then((response) => requireOK(response).json()),
-    ])
-      .then(([settings, currentHealth]) => {
-        if (!active) return;
-        setLocale(settings.language === "en" || settings.language === "zh-CN" ? settings.language : browserLocale());
-        setListener(settings);
-        setHealth(currentHealth);
-      })
-      .catch(() => {
-        if (!active) return;
-        setLoadFailed(true);
-        setHealth({
-          status: "unhealthy",
-          backend: { status: "unhealthy" },
-          database: { status: "unhealthy" },
-          publishedSubscription: { status: "unhealthy" },
-        });
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  async function switchLocale() {
-    const nextLocale: Locale = locale === "zh-CN" ? "en" : "zh-CN";
-    setLocale(nextLocale);
-    document.documentElement.lang = nextLocale;
-    try {
-      await fetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language: nextLocale }),
-      }).then(requireOK);
-    } catch {
-      setLoadFailed(true);
-    }
-  }
-
-  async function copySubscriptionURL() {
-    await navigator.clipboard.writeText(listener?.subscriptionURL || subscriptionURL());
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  return (
-    <main className="shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="NodeHarbor">
-          <span className="brandMark" aria-hidden="true">N</span>
-          <span>NodeHarbor</span>
-        </a>
-        <div className="languageControl">
-          <span>{text.language}</span>
-          <button type="button" onClick={switchLocale}>{text.switchLanguage}</button>
-        </div>
-      </header>
-
-      <section className="hero">
-        <p className="eyebrow">{text.eyebrow}</p>
-        <h1>{text.title}</h1>
-        <p className="subtitle">{text.subtitle}</p>
-      </section>
-
-      {loadFailed && <p className="notice" role="alert">{text.loadError}</p>}
-
-      <section className="panel" aria-labelledby="health-heading">
-        <div className="panelHeading">
-          <div>
-            <h2 id="health-heading">{text.health}</h2>
-            <p>{text.healthHint}</p>
-          </div>
-          <StatusPill state={health.status} label={text[health.status]} />
-        </div>
-        <div className="healthGrid">
-          <HealthCard label={text.backend} state={health.backend.status} statusLabel={text[health.backend.status]} />
-          <HealthCard label={text.database} state={health.database.status} statusLabel={text[health.database.status]} />
-          <HealthCard label={text.publication} state={health.publishedSubscription.status} statusLabel={text[health.publishedSubscription.status]} />
-        </div>
-      </section>
-
-      <UpstreamSubscriptions locale={locale} />
-
-      <EvaluationRun locale={locale} text={text} />
-
-      <EvaluationHistory text={text} />
-
-      <section className="subscriptionCard" aria-labelledby="subscription-heading">
-        <div>
-          <h2 id="subscription-heading">{text.subscription}</h2>
-          <p>{text.subscriptionHint}</p>
-          <div className="listenerDiagnostics">
-            <span>{text.localSubscription}</span>
-            <code>{listener?.localSubscriptionURL || subscriptionURL()}</code>
-            <span>{text.currentSubscription}</span>
-            <code>{listener?.subscriptionURL || subscriptionURL()}</code>
-            <span>{text.lanSubscriptions}</span>
-            {listener?.lanSubscriptionURLs?.length ? listener.lanSubscriptionURLs.map((url) => <code key={url}>{url}</code>) : <small>{text.noLanSubscriptions}</small>}
-            <small>{text.listener}: {listener?.listenAddress && listener.listenPort ? `${listener.listenAddress}:${listener.listenPort}` : "—"}</small>
-            {listener?.listenerError && <small role="alert">{listener.listenerError}</small>}
-            <small>{text.listenerHint}</small>
-            <small>{text.restartRequired}</small>
-          </div>
-        </div>
-        <button className="primaryButton" type="button" onClick={copySubscriptionURL}>
-          {copied ? text.copied : text.copy}
-        </button>
-      </section>
-    </main>
-  );
+  useEffect(() => { let active = true; fetch("/api/settings").then(requireOK).then((response) => response.json()).then((value) => { if (!active) return; setSettings(value); if (value.language === "en" || value.language === "zh-CN") setLocale(value.language); }).catch(() => { if (active) setLoadFailed(true); }); const onHash = () => setPage(readPage()); window.addEventListener("hashchange", onHash); return () => { active = false; window.removeEventListener("hashchange", onHash); }; }, []);
+  async function switchLocale() { const next = locale === "zh-CN" ? "en" : "zh-CN"; setLocale(next); try { await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: next }) }).then(requireOK); } catch { setLoadFailed(true); } }
+  const common = { locale, text, settings, setSettings };
+  return <div className="appShell"><aside className="sidebar"><a className="brand" href="#overview"><span className="brandMark">N</span><span>{text.brand}</span></a><nav aria-label="Primary navigation">{(["overview", "subscriptions", "nodes", "publish", "settings", "logs"] as Page[]).map((value) => <a key={value} href={`#${value}`} className={page === value ? "active" : ""} aria-current={page === value ? "page" : undefined}>{text[value]}</a>)}</nav><button className="languageButton" type="button" onClick={switchLocale}>{text.switchLanguage}</button></aside><main className="content"><header className="mobileHeader"><a className="brand" href="#overview"><span className="brandMark">N</span>{text.brand}</a><button type="button" onClick={switchLocale}>{text.switchLanguage}</button></header>{loadFailed && <p className="notice" role="alert">{locale === "zh-CN" ? "无法读取设置，请确认后端正在运行。" : "Settings could not be loaded. Confirm that the backend is running."}</p>}{page === "overview" && <Overview {...common} />}{page === "subscriptions" && <UpstreamSubscriptions locale={locale} />}{page === "nodes" && <Nodes {...common} />}{page === "publish" && <Publish {...common} />}{page === "settings" && <SettingsPage {...common} />}{page === "logs" && <Logs {...common} />}</main></div>;
 }
 
-type EvaluationText = typeof messages[Locale];
-type EvaluationStage = { status: string; reason?: string };
-type EvaluationState = { status: "idle" | "running" | "completed" | "failed" | "paused"; total: number; passed: number; failed: number; reason?: string; publicationResult?: string; results: Array<{ name: string; state: string; attempts: number; successful: number; medianLatencyMs: number; exitIdentity?: string; addressFamily?: string; ipScore?: number; scoreSource?: string; reason?: string; stages?: { availability: EvaluationStage; exitIdentity: EvaluationStage; ipScore: EvaluationStage } }> };
-type ProviderName = "ipsuper";
-type ProviderStatus = { name: ProviderName; enabled: boolean; status?: string; failureStatus?: string; lastCheckedAt?: string };
-
-function EvaluationRun({ locale, text }: { locale: Locale; text: EvaluationText }) {
-  const [run, setRun] = useState<EvaluationState>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
-  const [busy, setBusy] = useState(false);
-  const [ignoreCache, setIgnoreCache] = useState(false);
-  const [provider, setProvider] = useState<ProviderName>("ipsuper");
-  const [threshold, setThreshold] = useState(70);
-  const [providerStatuses, setProviderStatuses] = useState<ProviderStatus[]>([]);
-  const [interval, setInterval] = useState(360);
-  const [retention, setRetention] = useState(7);
-  const [attempts, setAttempts] = useState(3);
-  const [requiredSuccesses, setRequiredSuccesses] = useState(2);
-  const [timeoutSeconds, setTimeoutSeconds] = useState(5);
-  const [maxLatency, setMaxLatency] = useState(1500);
-  const [availabilityURLs, setAvailabilityURLs] = useState("");
-  const [workers, setWorkers] = useState(3);
-  const [scoringJitter, setScoringJitter] = useState(100);
-  const [cacheTTL, setCacheTTL] = useState(1440);
-  const [listenAddress, setListenAddress] = useState("127.0.0.1");
-  const [listenPort, setListenPort] = useState(9876);
-  useEffect(() => {
-    let active = true;
-    const refreshProviderStatuses = () => fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => {
-      if (active && Array.isArray(settings.scoringProviders)) setProviderStatuses(settings.scoringProviders);
-    }).catch(() => undefined);
-    const load = () => fetch("/api/evaluation-runs/current").then(requireOK).then((response) => response.json()).then((value) => { if (active && Array.isArray(value.results) && typeof value.status === "string") setRun({ ...value, results: value.results }); }).catch(() => undefined);
-    load();
-    const timer = window.setInterval(() => { load(); refreshProviderStatuses(); }, 1000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, []);
-  useEffect(() => { fetch("/api/settings").then(requireOK).then((response) => response.json()).then((settings) => { setProvider("ipsuper"); setThreshold(typeof settings.ipsuperThreshold === "number" ? settings.ipsuperThreshold : 70); setProviderStatuses(Array.isArray(settings.scoringProviders) ? settings.scoringProviders : []); setInterval(typeof settings.evaluationIntervalMinutes === "number" ? settings.evaluationIntervalMinutes : 360); setRetention(settings.historyRetentionDays || 7); setAttempts(settings.availabilityAttempts || 3); setRequiredSuccesses(settings.availabilityRequiredSuccesses || 2); setTimeoutSeconds(settings.availabilityTimeoutSeconds || 5); setMaxLatency(settings.availabilityMaxLatencyMs || 1500); setAvailabilityURLs(Array.isArray(settings.availabilityURLs) ? settings.availabilityURLs.join(", ") : ""); setWorkers(settings.evaluationWorkerCount || 3); setScoringJitter(typeof settings.scoringJitterMs === "number" ? settings.scoringJitterMs : 100); setCacheTTL(settings.scoreCacheTTLMinutes || 1440); setListenAddress(typeof settings.listenAddress === "string" ? settings.listenAddress : "127.0.0.1"); setListenPort(settings.listenPort || 9876); }).catch(() => undefined); }, []);
-  async function start() {
-    setBusy(true);
-    try { const response = await fetch("/api/evaluation-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ignoreCache }) }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); }
-  }
-  async function saveScoringSettings() {
-    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scoringProvider: provider, ipsuperThreshold: threshold, evaluationIntervalMinutes: interval, historyRetentionDays: retention, scoreCacheTTLMinutes: cacheTTL, listenAddress, listenPort }) }).then(requireOK);
-  }
-  async function saveAvailabilitySettings() {
-    await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ availabilityAttempts: attempts, availabilityRequiredSuccesses: requiredSuccesses, availabilityTimeoutSeconds: timeoutSeconds, availabilityMaxLatencyMs: maxLatency, availabilityURLs: availabilityURLs.split(",").map((value) => value.trim()).filter(Boolean), evaluationWorkerCount: workers, scoringJitterMs: scoringJitter }) }).then(requireOK);
-  }
-  const statusLabel = text[run.status];
-  return <section className="panel evaluationPanel" aria-labelledby="evaluation-heading">
-    <div className="panelHeading"><div><h2 id="evaluation-heading">{text.evaluation}</h2><p>{text.summary(run.passed, run.total)}</p></div><div><span className={`statusPill statusPill--${run.status}`}>{statusLabel}</span><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{text.startEvaluation}</button></div></div>
-    <div className="evaluationSettings"><label><span>{text.provider}</span><select value={provider} disabled><option value="ipsuper">{text.ipsuper}</option></select></label><label><span>{text.ipsuperThreshold}</span><input type="number" min="0" max="100" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></label><label><input type="checkbox" checked={ignoreCache} onChange={(event) => setIgnoreCache(event.target.checked)} />{text.ignoreCache}</label><button type="button" onClick={saveScoringSettings}>{text.saveSettings}</button></div>
-    {providerStatuses.length > 0 && <div className="providerStatuses" aria-label={text.provider}><strong>{text.provider}</strong>{providerStatuses.map((status) => { const statusKind = providerStatusKind(status.status, status.failureStatus); return <small key={status.name}><span className={`providerStatus providerStatus--${statusKind}`}>{text.ipsuper}: {status.enabled ? providerStatusLabel(statusKind, text) : text.providerDisabled}</span>{status.failureStatus ? ` · ${status.failureStatus}` : ""}</small>; })}</div>}
-     <div className="evaluationSettings"><label><span>{text.interval}</span><input type="number" min="0" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /></label><label><span>{text.retention}</span><input type="number" min="3" max="7" value={retention} onChange={(event) => setRetention(Number(event.target.value))} /></label><label><span>{text.cacheTTL}</span><input type="number" min="1" value={cacheTTL} onChange={(event) => setCacheTTL(Number(event.target.value))} /></label><label><span>{text.listenAddress}</span><input type="text" value={listenAddress} onChange={(event) => setListenAddress(event.target.value)} /></label><label><span>{text.listenPort}</span><input type="number" min="1024" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /></label></div>
-     <div className="evaluationSettings"><label><span>{text.availabilityAttempts}</span><input type="number" min="1" max="10" value={attempts} onChange={(event) => setAttempts(Number(event.target.value))} /></label><label><span>{text.availabilityRequired}</span><input type="number" min="1" max="10" value={requiredSuccesses} onChange={(event) => setRequiredSuccesses(Number(event.target.value))} /></label><label><span>{text.availabilityTimeout}</span><input type="number" min="1" max="300" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label></div>
-     <div className="evaluationSettings"><label><span>{text.availabilityMaxLatency}</span><input type="number" min="1" max="60000" value={maxLatency} onChange={(event) => setMaxLatency(Number(event.target.value))} /></label><label><span>{text.availabilityURLs}</span><input type="text" value={availabilityURLs} onChange={(event) => setAvailabilityURLs(event.target.value)} /></label><label><span>{text.evaluationWorkers}</span><input type="number" min="1" max="3" value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></label><label><span>{text.scoringJitter}</span><input type="number" min="0" max="1000" value={scoringJitter} onChange={(event) => setScoringJitter(Number(event.target.value))} /></label><button type="button" onClick={saveAvailabilitySettings}>{text.saveAvailabilitySettings}</button></div>
-     {run.reason && <p className="sourceError" role="alert">{run.reason}</p>}
-    {run.publicationResult === "retained" && <p className="retentionNotice">{text.publicationRetained}</p>}
-    {run.results.length > 0 && <div className="nodeResults">{run.results.map((result) => <div className={`nodeResult nodeResult--${result.state === "passed" ? "accepted" : "rejected"}`} key={result.name}><div className="nodeResultHeading"><span>{result.name}</span><strong>{result.state === "passed" ? `${result.ipScore?.toFixed(0) ?? "?"} · ${result.addressFamily ?? "?"}` : text.failed}</strong></div><small>{text.probeSuccess(result.successful, result.attempts)}</small>{result.scoreSource && <small>{result.scoreSource === "cache" ? text.scoreCache : text.scoreProvider}</small>}{result.exitIdentity && <small>{result.exitIdentity} · {result.medianLatencyMs.toFixed(0)} ms</small>}{result.stages && <div className="nodeStages"><EvaluationStage label={text.availabilityStage} stage={result.stages.availability} text={text} /><EvaluationStage label={text.exitIdentityStage} stage={result.stages.exitIdentity} text={text} /><EvaluationStage label={text.ipScoreStage} stage={result.stages.ipScore} text={text} /></div>}{result.reason && <small className="nodeResultReason">{result.reason}</small>}</div>)}</div>}
-  </section>;
+function Overview({ text, settings }: { text: Text; locale: Locale; settings: Settings | null; setSettings: (value: Settings) => void }) {
+  const [subscriptions, setSubscriptions] = useState<UpstreamSubscription[]>([]); const [run, setRun] = useState<EvaluationRun | null>(null); const [provider, setProvider] = useState<any>(null); const [publication, setPublication] = useState<Publication | null>(null); const [copied, setCopied] = useState(false);
+  useEffect(() => { let active = true; fetch("/api/upstream-subscriptions").then(requireOK).then((r) => r.json()).then((v) => { if (active) setSubscriptions(Array.isArray(v) ? v : []); }).catch(() => undefined); fetch("/api/evaluation-runs/current").then(requireOK).then((r) => r.json()).then((v) => { if (active && v.status && v.status !== "idle") setRun(v); }).catch(() => undefined); fetch("/api/publication").then(requireOK).then((r) => r.json()).then((v) => { if (active) setPublication(v); }).catch(() => undefined); if (settings?.scoringProviders) setProvider(settings.scoringProviders.find((v: any) => v.name === "ipsuper")); return () => { active = false; }; }, [settings]);
+  const available = run?.results?.filter((item) => item.stages?.availability?.status === "passed").length || 0; const link = settings?.subscriptionURL || subscriptionURL(); const providerLabel = !provider ? text.noProvider : !provider.enabled || provider.status === "unavailable" || provider.failureStatus ? text.unavailable : provider.status === "available" ? text.available : text.unverified;
+  async function copy() { await navigator.clipboard?.writeText(link); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }
+  return <section className="page" aria-labelledby="overview-heading"><div className="pageHeading"><div><p className="eyebrow">{text.eyebrow}</p><h1 id="overview-heading">{text.overview}</h1><p className="pageHint">{text.overviewHint}</p></div></div><div className="metricGrid"><Metric label={text.subscriptionCount} value={String(subscriptions.length)} /><Metric label={text.latestEvaluation} value={run?.finishedAt || run?.startedAt ? formatDate(run.finishedAt || run.startedAt, text.never) : text.never} /><Metric label={text.totalNodes} value={String(run?.total || 0)} /><Metric label={text.availableNodes} value={String(available)} /><Metric label={text.qualifiedNodes} value={String(run?.passed || 0)} /></div><div className="overviewActions"><article className="panel linkPanel"><div><h2>{text.publish}</h2><code>{link}</code></div><button className="primaryButton" type="button" onClick={copy}>{copied ? text.copied : text.copy}</button></article><article className="panel providerPanel"><span className={`providerIndicator ${providerLabel === text.available ? "is-good" : ""}`} aria-hidden="true" /><div><h2>{text.scoringProvider}</h2><p>{text.providerScore}: <strong>{providerLabel}</strong></p></div></article></div></section>;
 }
 
-function providerStatusKind(status: string | undefined, failureStatus: string | undefined): "available" | "unavailable" | "unverified" {
-  if (failureStatus || status === "unavailable") return "unavailable";
-  if (status === "available") return "available";
-  return "unverified";
+function Nodes({ text, locale, settings }: { text: Text; locale: Locale; settings: Settings | null; setSettings: (value: Settings) => void }) {
+  const [subscriptions, setSubscriptions] = useState<UpstreamSubscription[]>([]); const [nodes, setNodes] = useState<Record<string, Node[]>>({}); const [run, setRun] = useState<EvaluationRun>({ status: "idle", total: 0, passed: 0, failed: 0, results: [] }); const [busy, setBusy] = useState(false); const previousStatus = useRef("idle");
+  const loadSourcesAndNodes = () => fetch("/api/upstream-subscriptions").then(requireOK).then((r) => r.json()).then((items: UpstreamSubscription[]) => { setSubscriptions(Array.isArray(items) ? items : []); return Promise.all((items || []).map((item) => fetch(`/api/upstream-subscriptions/${item.id}/nodes`).then(requireOK).then((r) => r.json().then((value) => [item.id, value] as const)))); }).then((values) => setNodes(Object.fromEntries(values))).catch(() => undefined);
+  const loadRun = () => fetch("/api/evaluation-runs/current").then(requireOK).then((r) => r.json()).then((value) => { if (Array.isArray(value.results)) setRun(value); return value as EvaluationRun; }).catch(() => undefined);
+  useEffect(() => { void loadSourcesAndNodes(); void loadRun(); const timer = window.setInterval(() => { void loadRun().then((value) => { if (value && previousStatus.current === "running" && value.status !== "running") void loadSourcesAndNodes(); if (value) previousStatus.current = value.status; }); }, 1000); return () => window.clearInterval(timer); }, []);
+  async function start() { setBusy(true); try { const response = await fetch("/api/evaluation-runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }); if (!response.ok) throw new Error(`HTTP ${response.status}`); setRun(await response.json()); } finally { setBusy(false); } }
+  const resultByID = useMemo(() => new Map(run.results.map((item) => [item.nodeId || item.name, item])), [run.results]);
+  return <section className="page" aria-labelledby="nodes-heading"><div className="pageHeading"><div><p className="eyebrow">NodeHarbor</p><h1 id="nodes-heading">{text.nodes}</h1><p className="pageHint">{text.evaluation}: {statusLabel(run.status, text)}</p></div><button className="primaryButton" type="button" onClick={start} disabled={busy || run.status === "running"}>{run.status === "running" ? text.running : text.startEvaluation}</button></div><div className="subscriptionSections">{subscriptions.length === 0 && <p className="emptyState">{text.noSubscriptions}</p>}{subscriptions.map((subscription) => <NodeSubscriptionSection key={subscription.id} text={text} subscription={subscription} nodes={nodes[subscription.id] || []} results={run.results} resultByID={resultByID} />)}</div></section>;
 }
 
-function providerStatusLabel(status: "available" | "unavailable" | "unverified", text: EvaluationText): string {
-  if (status === "unavailable") return text.providerUnavailable;
-  if (status === "available") return text.providerReady;
-  return text.providerUnverified;
+function NodeSubscriptionSection({ text, subscription, nodes, results, resultByID }: { text: Text; subscription: UpstreamSubscription; nodes: Node[]; results: EvaluationResult[]; resultByID: Map<string, EvaluationResult> }) {
+  const [open, setOpen] = useState(true);
+  const sourceResults = results.filter((item) => item.sourceId === subscription.id);
+  function toggle(event: React.MouseEvent<HTMLDetailsElement>) { if ((event.target as HTMLElement).closest("summary")) { event.preventDefault(); setOpen((current) => !current); } }
+  return <details className="nodeSection" open={open} onClick={toggle}><summary><span>{subscription.name}</span><small>{nodes.length} · {text.collapseHint}</small></summary><div className="nodeGrid">{nodes.map((node) => <NodeCard key={node.id || node.name} text={text} node={node} result={resultByID.get(node.id || node.name)} />)}{nodes.length === 0 && sourceResults.map((item) => <NodeCard key={item.nodeId || item.name} text={text} result={item} node={{ name: item.name, config: item.config }} />)}{nodes.length === 0 && sourceResults.length === 0 && <p className="emptyState">{text.noNodes}</p>}</div></details>;
 }
 
-function EvaluationStage({ label, stage, text }: { label: string; stage: EvaluationStage; text: EvaluationText }) {
-  const status = stage.status || "pending";
-  const statusLabel = status === "passed" ? text.stagePassed : status === "running" ? text.stageRunning : status === "unavailable" ? text.stageUnavailable : status === "failed" ? text.stageFailed : text.stagePending;
-  return <article className={`evaluationStage evaluationStage--${status}`}><div><span>{label}</span><strong>{statusLabel}</strong></div>{stage.reason && <small>{stage.reason}</small>}</article>;
-}
+function NodeCard({ text, node, result }: { text: Text; node: Node; result?: EvaluationResult }) { const config = result?.config || node.config || {}; const protocol = String(config.type || text.unknown); const labels = transportLabels(config); return <article className="nodeCard"><div className="nodeCardTop"><h3>{result?.name || node.name}</h3>{result?.scoreSource === "cache" && <span className="cacheTag">{text.cached}</span>}</div><dl className="nodeFields"><div><dt>{text.protocol}</dt><dd>{protocol}</dd></div><div><dt>{text.latency}</dt><dd>{text.latencyValue(result?.medianLatencyMs)}</dd></div><div><dt>{text.score}</dt><dd>{text.scoreValue(result?.ipScore ?? Number.NaN)}</dd></div><div><dt>{text.transport}</dt><dd>{labels.length ? labels.join(" · ") : text.unknown}</dd></div></dl>{result?.reason && result.state !== "passed" && <small className="nodeReason">{result.reason}</small>}</article>; }
 
-type HistoryRun = {
-  id: string;
-  trigger: string;
-  status: string;
-  durationMs: number;
-  total: number;
-  passed: number;
-  failed: number;
-  publicationResult?: string;
-  failureSummary?: string;
-  phases: Array<{ name: string; status: string; durationMs: number }>;
-};
+function Publish({ text, settings }: { text: Text; locale: Locale; settings: Settings | null; setSettings: (value: Settings) => void }) { const [publication, setPublication] = useState<Publication | null>(null); const [copied, setCopied] = useState(false); useEffect(() => { fetch("/api/publication").then(requireOK).then((r) => r.json()).then(setPublication).catch(() => setPublication(null)); }, []); const link = settings?.subscriptionURL || subscriptionURL(); async function copy() { await navigator.clipboard?.writeText(link); setCopied(true); window.setTimeout(() => setCopied(false), 1500); } return <section className="page" aria-labelledby="publish-heading"><div className="pageHeading"><div><p className="eyebrow">NodeHarbor</p><h1 id="publish-heading">{text.publish}</h1><p className="pageHint">{text.publicationHint}</p></div></div><article className="panel publicationSummary"><div><span className="muted">{text.status}</span><strong>{publication?.status === "published" ? text.published : text.retained}</strong></div><div><span className="muted">{text.publicationTime}</span><strong>{formatDate(publication?.publishedAt, text.unknown)}</strong></div><code>{link}</code><button className="primaryButton" type="button" onClick={copy}>{copied ? text.copied : text.copy}</button></article><div className="subscriptionSections">{!publication?.groups?.length && <p className="emptyState">{text.noPublication}</p>}{publication?.groups?.map((group) => <details className="nodeSection" key={group.subscriptionId} open><summary><span>{group.subscriptionName}</span><small>{group.nodes.length}</small></summary><div className="nodeGrid">{group.nodes.map((node) => <NodeCard key={node.nodeId} text={text} node={{ name: node.name, config: node.config }} result={{ name: node.name, config: node.config, state: "passed", medianLatencyMs: node.medianLatencyMs, ipScore: node.ipScore, scoreSource: node.scoreSource }} />)}</div></details>)}</div></section>; }
 
-function EvaluationHistory({ text }: { text: EvaluationText }) {
-  const [runs, setRuns] = useState<HistoryRun[]>([]);
-  const [logs, setLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
-  useEffect(() => {
-    let active = true;
-    fetch("/api/evaluation-runs").then(requireOK).then((response) => response.json()).then((history) => {
-      if (active && Array.isArray(history)) setRuns(history);
-    }).catch(() => undefined);
-    fetch("/api/logs").then(requireOK).then((response) => response.json()).then((diagnostics) => {
-      if (active && Array.isArray(diagnostics)) setLogs(diagnostics.slice(0, 8));
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, []);
-  return <section className="panel" aria-labelledby="history-heading">
-    <div className="panelHeading"><div><h2 id="history-heading">{text.history}</h2><p>{text.historyHint}</p></div><a className="secondaryButton" href="/api/settings/export" download="nodeharbor-settings.json">{text.exportConfig}</a></div>
-    {runs.length === 0 ? <p className="emptyState">—</p> : <div className="historyList">{runs.map((run) => <article className="historyItem" key={run.id}>
-      <div className="historySummary"><strong>{run.trigger}</strong><span>{run.status}</span><span>{formatDuration(run.durationMs)}</span><span>{run.passed} / {run.total}</span><span>{run.publicationResult ?? text.notAttempted}</span></div>
-      <small>{text.phase}: {run.phases.map((phase) => `${phase.name} (${formatDuration(phase.durationMs)})`).join(" · ") || "—"}</small>
-      {run.failureSummary && <small>{text.failureSummary}: {run.failureSummary}</small>}
-    </article>)}</div>}
-    <div className="historyLogs"><h3>{text.logs}</h3>{logs.length === 0 ? <p className="emptyState">—</p> : logs.map((log, index) => <small key={`${log.timestamp}-${index}`}>{log.level}: {log.message}</small>)}</div>
-  </section>;
-}
+function SettingsPage({ text, settings, setSettings }: { text: Text; locale: Locale; settings: Settings | null; setSettings: (value: Settings) => void }) { const [form, setForm] = useState<Record<string, any>>({}); const [saved, setSaved] = useState(false); useEffect(() => { if (settings) setForm({ providerEnabled: settings.ipsuperEnabled !== false, threshold: settings.ipsuperThreshold ?? 70, retention: settings.historyRetentionDays ?? 7, attempts: settings.availabilityAttempts ?? 3, required: settings.availabilityRequiredSuccesses ?? 2, timeout: settings.availabilityTimeoutSeconds ?? 5, maxLatency: settings.availabilityMaxLatencyMs ?? 1500, urls: (settings.availabilityURLs || []).join(", "), workers: settings.evaluationWorkerCount ?? 3, jitter: settings.scoringJitterMs ?? 100, cacheTTL: settings.scoreCacheTTLMinutes ?? 1440, listenAddress: settings.listenAddress ?? "127.0.0.1", listenPort: settings.listenPort ?? 9876 }); }, [settings]); function update(key: string, value: any) { setForm((current) => ({ ...current, [key]: value })); } async function save() { const payload = { scoringProvider: "ipsuper", ipsuperEnabled: Boolean(form.providerEnabled), ipsuperThreshold: Number(form.threshold), historyRetentionDays: Number(form.retention), availabilityAttempts: Number(form.attempts), availabilityRequiredSuccesses: Number(form.required), availabilityTimeoutSeconds: Number(form.timeout), availabilityMaxLatencyMs: Number(form.maxLatency), availabilityURLs: String(form.urls).split(",").map((v) => v.trim()).filter(Boolean), evaluationWorkerCount: Number(form.workers), scoringJitterMs: Number(form.jitter), scoreCacheTTLMinutes: Number(form.cacheTTL), listenAddress: form.listenAddress, listenPort: Number(form.listenPort) }; await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then(requireOK); setSettings({ ...(settings || {}), ...payload }); setSaved(true); window.setTimeout(() => setSaved(false), 1500); } const fields: Array<[string, string, string]> = [["threshold", text.threshold, "number"], ["retention", text.retention, "number"], ["attempts", text.attempts, "number"], ["required", text.required, "number"], ["timeout", text.timeout, "number"], ["maxLatency", text.maxLatency, "number"], ["urls", text.urls, "text"], ["workers", text.workers, "number"], ["jitter", text.jitter, "number"], ["cacheTTL", text.cacheTTL, "number"], ["listenAddress", text.listenAddress, "text"], ["listenPort", text.listenPort, "number"]]; return <section className="page" aria-labelledby="settings-heading"><div className="pageHeading"><div><p className="eyebrow">NodeHarbor</p><h1 id="settings-heading">{text.settings}</h1></div><a className="secondaryButton" href="/api/settings/export" download="nodeharbor-settings.json">{text.export}</a></div><div className="panel settingsPanel"><div className="settingsStatus"><label><span>{text.provider}</span><select value="ipsuper" disabled><option value="ipsuper">IPSuper</option></select></label><label className="checkboxField"><input type="checkbox" checked={Boolean(form.providerEnabled)} onChange={(event) => update("providerEnabled", event.target.checked)} />{text.providerEnabled}</label><div><span className="muted">{text.browserRuntime}</span><strong>{settings?.browserRuntimeStatus || text.unknown}</strong></div><div><span className="muted">{text.diagnosticMode}</span><strong>{settings?.browserDiagnosticMode || text.unknown}</strong></div></div><div className="formGrid">{fields.map(([key, label, type]) => <label key={key}><span>{label}</span><input type={type} value={form[key] ?? ""} onChange={(event) => update(key, type === "number" ? Number(event.target.value) : event.target.value)} /></label>)}</div><div className="formActions"><button className="primaryButton" type="button" onClick={save}>{saved ? text.saved : text.save}</button><small className="muted">{text.restart}</small></div></div></section>; }
 
-function formatDuration(durationMs: number): string {
-  if (!Number.isFinite(durationMs) || durationMs < 0) return "—";
-  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
-  return `${Math.round(durationMs / 1000)}s`;
-}
+function Logs({ text }: { text: Text; locale: Locale; settings: Settings | null; setSettings: (value: Settings) => void }) { const [logs, setLogs] = useState<Array<{ timestamp: string; level: string; runId?: string; message: string }>>([]); useEffect(() => { fetch("/api/logs").then(requireOK).then((r) => r.json()).then((v) => setLogs(Array.isArray(v) ? v : [])).catch(() => undefined); }, []); return <section className="page" aria-labelledby="logs-heading"><div className="pageHeading"><div><p className="eyebrow">NodeHarbor</p><h1 id="logs-heading">{text.logs}</h1><p className="pageHint">{text.logsHint}</p></div></div><div className="panel logList">{logs.length === 0 && <p className="emptyState">{text.emptyLogs}</p>}{logs.map((log, index) => <article className="logItem" key={`${log.timestamp}-${index}`}><time>{formatDate(log.timestamp, text.unknown)}</time><span className={`logLevel logLevel--${log.level}`}>{log.level}</span><p>{log.message}</p>{log.runId && <small>{text.source}: {log.runId}</small>}</article>)}</div></section>; }
 
-function HealthCard({ label, state, statusLabel }: { label: string; state: HealthState; statusLabel: string }) {
-  return (
-    <article className="healthCard">
-      <span className={`statusDot statusDot--${state}`} aria-hidden="true" />
-      <div>
-        <h3>{label}</h3>
-        <p>{statusLabel}</p>
-      </div>
-    </article>
-  );
-}
-
-function StatusPill({ state, label }: { state: HealthState; label: string }) {
-  return <span className={`statusPill statusPill--${state}`}>{label}</span>;
-}
-
-function browserLocale(): Locale {
-  return navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
-}
-
-function subscriptionURL(): string {
-  return `${window.location.origin}/sub/clash.yaml`;
-}
-
-function requireOK(response: Response): Response {
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response;
-}
+function Metric({ label, value }: { label: string; value: string }) { return <article className="metricCard"><span>{label}</span><strong>{value}</strong></article>; }
+function statusLabel(status: string, text: Text) { return status === "running" ? text.running : status === "completed" ? text.completed : status === "failed" ? text.failed : text.idle; }
+function transportLabels(config: Record<string, any>): string[] { const result: string[] = []; const add = (value: any) => { if (typeof value === "string" && value.trim() && !result.includes(value.toUpperCase())) result.push(value.toUpperCase()); }; add(config.transport); add(config.network); if (config.udp === true || String(config.udp).toLowerCase() === "true") add("UDP"); if (config.xudp === true || String(config.xudp).toLowerCase() === "true") add("X-UDP"); if (!result.length && config.tcp === true) add("TCP"); return result; }
+function readPage(): Page { const value = window.location.hash.slice(1) as Page; return ["overview", "subscriptions", "nodes", "publish", "settings", "logs"].includes(value) ? value : "overview"; }
+function browserLocale(): Locale { return navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"; }
+function subscriptionURL(): string { return `${window.location.origin}/sub/clash.yaml`; }
+function formatDate(value: string | undefined, fallback: string): string { if (!value) return fallback; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(); }
+function requireOK(response: Response): Response { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response; }

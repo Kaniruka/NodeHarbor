@@ -38,6 +38,13 @@ func NewPlaywrightBrowserRuntime(config BrowserRuntimeConfig) *PlaywrightBrowser
 	return &PlaywrightBrowserRuntime{config: config}
 }
 
+func (runtime *PlaywrightBrowserRuntime) DiagnosticsMode() string {
+	if !runtime.config.Headless {
+		return "headed"
+	}
+	return "headless"
+}
+
 func (runtime *PlaywrightBrowserRuntime) Fetch(ctx context.Context, proxyEndpoint string, targets []string) ([]BrowserPage, error) {
 	return runtime.fetchUntilText(ctx, proxyEndpoint, targets, nil)
 }
