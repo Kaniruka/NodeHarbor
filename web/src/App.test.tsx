@@ -192,6 +192,20 @@ test("Nodes labels active stages, keeps long failure reasons out of cards, and f
   expect(screen.queryByText("低分节点")).not.toBeInTheDocument();
 });
 
+test("Nodes labels candidates without a completed result while an evaluation is running", async () => {
+  const runningRun = { ...currentRun, status: "running", total: 0, passed: 0, failed: 0, results: [] };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([source]);
+    if (url.endsWith("/api/upstream-subscriptions/source-1/nodes")) return Response.json([{ id: "node-1", name: "待评估节点", config: { type: "vless" }, state: "accepted" }]);
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json(runningRun);
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
+  expect(await screen.findByText("评估中")).toBeInTheDocument();
+});
+
 test("Publish shows only the atomic publication snapshot using the same grouping", async () => {
   mockAPI(); const writeText = vi.fn().mockResolvedValue(undefined); Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } }); render(<App />); await userEvent.click(await screen.findByRole("link", { name: "发布" }));
   expect(await screen.findByRole("heading", { name: "发布" })).toBeInTheDocument();
