@@ -17,17 +17,19 @@ import (
 // query page observed in the browser, while retaining the Test Channel
 // transport supplied by evaluation.
 type IPSuperProvider struct {
-	Client    *http.Client
-	Endpoint  string
-	UserAgent string
-	Timeout   time.Duration
+	Client               *http.Client
+	Endpoint             string
+	UserAgent            string
+	Timeout              time.Duration
+	IPv4IdentityEndpoint string
+	IPv6IdentityEndpoint string
 }
 
 func NewIPSuperProvider(client *http.Client) IPSuperProvider {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return IPSuperProvider{Client: client, Endpoint: "https://ipsuper.com", UserAgent: "NodeHarbor/1.0", Timeout: 10 * time.Second}
+	return IPSuperProvider{Client: client, Endpoint: "https://ipsuper.com", UserAgent: "NodeHarbor/1.0", Timeout: 10 * time.Second, IPv4IdentityEndpoint: ipv4IdentityEndpoint, IPv6IdentityEndpoint: ipv6IdentityEndpoint}
 }
 
 func (provider IPSuperProvider) Name() string { return "ipsuper" }
@@ -106,23 +108,24 @@ func (provider IPSuperProvider) get(ctx context.Context, client *http.Client, ta
 	return body, nil
 }
 
-var ipSuperAggregateScore = regexp.MustCompile(`(?is)(?:综合\s*安全\s*分|aggregate\s*security\s*score)\D{0,160}?([0-9]{1,3}(?:\.[0-9]+)?)\s*(?:/\s*100)?`)
+var ipSuperAggregateScore = regexp.MustCompile(`(?is)(?:综合\s*安全\s*分|aggregate\s*security\s*score).*?([0-9]{1,3}(?:\.[0-9]+)?)(?:\s|<[^>]*>)*\/\s*100`)
 
 func parseIPSuperAggregateScore(body []byte) (float64, bool) {
 	if isProviderChallenge(body) {
 		return 0, false
 	}
-	match := ipSuperAggregateScore.FindSubmatch(body)
-	if len(match) != 2 {
+	matches := ipSuperAggregateScore.FindAllSubmatch(body, -1)
+	if len(matches) == 0 {
 		return 0, false
 	}
+	match := matches[len(matches)-1]
 	score, err := strconv.ParseFloat(string(match[1]), 64)
 	return score, err == nil && score >= 0 && score <= 100
 }
 
 func isProviderChallenge(body []byte) bool {
 	content := strings.ToLower(string(body))
-	for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked"} {
+	for _, marker := range []string{"captcha", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked"} {
 		if strings.Contains(content, marker) {
 			return true
 		}

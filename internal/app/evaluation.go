@@ -19,8 +19,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var errIsolationPaused = errors.New("isolation paused")
-
 type evaluationRun struct {
 	ID                string  `json:"id"`
 	Status            string  `json:"status"`
@@ -577,10 +575,6 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, fmt.Errorf("evaluation interrupted: %w", err))
 		return
 	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		application.pauseEvaluationAtPhase(ctx, id, "refresh", reason)
-		return
-	}
 	refreshed, err := application.refreshUpstreamSubscriptions(ctx)
 	if err != nil {
 		if sourceErr := application.recordEvaluationSourceStates(ctx, id); sourceErr != nil {
@@ -595,10 +589,6 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	}
 	if !refreshed {
 		application.finishEvaluationRun(ctx, id, 0, 0, 0, errors.New("all Upstream Subscriptions failed to refresh"))
-		return
-	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		application.pauseEvaluationAtPhase(ctx, id, "refresh", reason)
 		return
 	}
 	application.finishEvaluationPhase(ctx, id, "refresh", "completed", "")
@@ -620,22 +610,12 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 	defer cancelRun()
 	jobs := make(chan evaluationNode)
 	results := make(chan evaluationNodeResult, len(nodes))
-	isolationFailures := make(chan string, 1)
-	go application.monitorIsolation(runContext, cancelRun, isolationFailures)
 	var workers sync.WaitGroup
 	for worker := 0; worker < availability.workerCount; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for node := range jobs {
-				if reason, paused := application.isolationFailure(runContext); paused {
-					select {
-					case isolationFailures <- reason:
-					default:
-					}
-					cancelRun()
-					return
-				}
 				results <- application.evaluateNode(runContext, node, availability, ignoreCache, runStartedAt)
 			}
 		}()
@@ -680,22 +660,8 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 			return
 		}
 	}
-	select {
-	case reason := <-isolationFailures:
-		application.pauseEvaluationRun(ctx, id, reason)
-		return
-	default:
-	}
 	if err := ctx.Err(); err != nil {
 		application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, fmt.Errorf("evaluation interrupted: %w", err))
-		return
-	}
-	if err := runContext.Err(); err != nil {
-		application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor could not prove a safe Evaluation Run")
-		return
-	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		application.pauseEvaluationRun(ctx, id, reason)
 		return
 	}
 	if reason := application.evaluationFailureReason(ctx, evaluated); reason != nil {
@@ -714,18 +680,8 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.finishEvaluationPhase(ctx, id, "availability-and-scoring", "completed", "")
 		application.beginEvaluationPhase(ctx, id, "publication")
 		if err := application.publishQualifiedNodes(runContext, id); err != nil {
-			if errors.Is(err, errIsolationPaused) || (ctx.Err() == nil && runContext.Err() != nil) {
-				application.setPublicationResult(ctx, id, "retained")
-				application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor interrupted publication; previous Publication Snapshot retained")
-				return
-			}
 			application.setPublicationResult(ctx, id, "failed")
 			application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, err)
-			return
-		}
-		if ctx.Err() == nil && runContext.Err() != nil {
-			application.setPublicationResult(ctx, id, "retained")
-			application.pauseEvaluationRun(ctx, id, "Surfing isolation monitor interrupted publication; previous Publication Snapshot retained")
 			return
 		}
 		application.finishEvaluationPhase(ctx, id, "publication", "completed", "")
@@ -735,49 +691,6 @@ func (application *Application) executeEvaluationRun(ctx context.Context, id str
 		application.setPublicationResult(ctx, id, "retained")
 	}
 	application.finishEvaluationRun(ctx, id, len(nodes), passed, failed, nil)
-}
-
-func (application *Application) isolationFailure(ctx context.Context) (string, bool) {
-	if application.dependencies.Isolation == nil {
-		return "", false
-	}
-	status, err := application.dependencies.Isolation.Check(ctx)
-	if err != nil {
-		return err.Error(), true
-	}
-	if status.Verified && status.Mode != "tun" && status.Mode != "unknown" {
-		return "", false
-	}
-	reason := status.Reason
-	if reason == "" {
-		reason = "Surfing isolation could not be proven"
-	}
-	return reason, true
-}
-
-func (application *Application) monitorIsolation(ctx context.Context, cancel context.CancelFunc, failures chan<- string) {
-	if application.dependencies.Isolation == nil {
-		return
-	}
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			reason, paused := application.isolationFailure(ctx)
-			if !paused {
-				continue
-			}
-			select {
-			case failures <- reason:
-			default:
-			}
-			cancel()
-			return
-		}
-	}
 }
 
 func (application *Application) evaluationFailureReason(ctx context.Context, results []evaluationNodeResult) error {
@@ -790,9 +703,6 @@ func (application *Application) evaluationFailureReason(ctx context.Context, res
 	reasons := make([]string, 0, len(results))
 	seenReasons := make(map[string]struct{}, len(results))
 	for _, result := range results {
-		if strings.HasPrefix(result.Reason, "isolation_paused:") {
-			return fmt.Errorf("%s; previous Publication Snapshot retained", result.Reason)
-		}
 		if result.Stages.IPScore.Status == "passed" {
 			hasScoredNode = true
 		}
@@ -961,9 +871,6 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		return fmt.Errorf("%w: %s", errIsolationPaused, reason)
-	}
 	transaction, err := application.database.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -974,9 +881,6 @@ func (application *Application) publishQualifiedNodes(ctx context.Context, runID
 	}
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		return fmt.Errorf("%w: %s", errIsolationPaused, reason)
 	}
 	return transaction.Commit()
 }
@@ -1135,11 +1039,6 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 	// from an earlier attempt as the node's final diagnostic.
 	result.Reason = ""
 	result.Stages.Availability.Status = "passed"
-	if reason, paused := application.isolationFailure(ctx); paused {
-		result.Reason = "isolation_paused: " + reason
-		failStage(&result.Stages.ExitIdentity, result.Reason)
-		return result
-	}
 	discoverer, ok := application.dependencies.TestChannel.(ExitIdentityDiscoveryChannel)
 	if !ok {
 		result.Reason = "test_channel_unverified: Test Channel does not expose family-specific Exit Identity discovery"
@@ -1165,24 +1064,19 @@ func (application *Application) evaluateNode(ctx context.Context, node evaluatio
 		failStage(&result.Stages.ExitIdentity, result.Reason)
 		return result
 	}
-	if reason, paused := application.isolationFailure(ctx); paused {
-		result.Reason = "isolation_paused: " + reason
-		failStage(&result.Stages.IPScore, result.Reason)
-		return result
-	}
 	result.Stages.IPScore.Status = "running"
 	score, family, source, err := application.scoreNode(ctx, result.ExitIdentity, node, channel, config.scoringJitter, config.scoreCacheTTL, ignoreCache, runStartedAt)
 	result.AddressFamily = family
 	if err != nil {
+		if errors.Is(err, errBrowserRuntimeUnavailable) {
+			result.Reason = "runtime_unavailable: " + err.Error()
+			failStage(&result.Stages.IPScore, result.Reason)
+			return result
+		}
 		if errors.Is(err, errScoringProviderUnavailable) {
 			result.Reason = "provider_unavailable: " + err.Error()
 			result.Stages.IPScore.Status = "unavailable"
 			result.Stages.IPScore.Reason = err.Error()
-			return result
-		}
-		if strings.HasPrefix(err.Error(), "isolation_paused:") {
-			result.Reason = err.Error()
-			failStage(&result.Stages.IPScore, result.Reason)
 			return result
 		}
 		result.Reason = "score_unavailable: " + err.Error()
@@ -1336,6 +1230,29 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		return 0, addressFamily(exitIdentity), "", errors.New("Scoring Provider cannot bind requests to the verified Test Channel")
 	}
 	return application.scoreWithCacheUsing(ctx, exitIdentity, providerValue, cacheTTL, ignoreCache, runStartedAt, func() (float64, error) {
+		if browserProvider, browserOK := providerValue.(BrowserScoringProvider); browserOK && application.dependencies.BrowserRuntime != nil {
+			browserChannel, channelOK := channel.(TestChannelBrowserProxy)
+			if !channelOK {
+				return 0, fmt.Errorf("%w: Test Channel cannot provide a Browser Proxy Endpoint", errBrowserRuntimeUnavailable)
+			}
+			proxyEndpoint, endpointErr := browserChannel.BrowserProxyEndpoint(ctx, ProxyNode{Name: node.Name, Config: node.Config})
+			if endpointErr != nil {
+				return 0, fmt.Errorf("%w: create Browser Proxy Endpoint: %v", errBrowserRuntimeUnavailable, endpointErr)
+			}
+			score, browserErr := browserProvider.ScoreWithBrowser(ctx, exitIdentity, proxyEndpoint, application.dependencies.BrowserRuntime)
+			if browserErr != nil {
+				if errors.Is(browserErr, errScoringProviderUnavailable) {
+					application.recordScoringProviderFailure(ctx, providerValue, browserErr)
+				}
+				return 0, browserErr
+			}
+			application.clearScoringProviderFailure(ctx, providerValue)
+			return score, nil
+		}
+		// Lightweight test assemblies may intentionally omit BrowserRuntime and
+		// exercise the legacy HTTP adapter directly. The Windows production
+		// assembly always supplies BrowserRuntime, so real provider scoring takes
+		// the browser-backed path above.
 		transportProvider, hasTransport := channel.(TestChannelHTTPClient)
 		if !hasTransport {
 			return 0, errors.New("Test Channel cannot provide scoring transport")
@@ -1346,9 +1263,6 @@ func (application *Application) scoreNode(ctx context.Context, exitIdentity stri
 		}
 		if err := waitScoringJitter(ctx, jitter); err != nil {
 			return 0, err
-		}
-		if reason, paused := application.isolationFailure(ctx); paused {
-			return 0, fmt.Errorf("isolation_paused: %s", reason)
 		}
 		score, err := provider.ScoreWithClient(ctx, exitIdentity, client)
 		if err != nil {

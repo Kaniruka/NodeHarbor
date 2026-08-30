@@ -1,6 +1,7 @@
 param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\dist'),
-    [string]$Version = 'dev'
+    [string]$Version = 'dev',
+    [string]$BrowserRuntimeDirectory = (Join-Path $PSScriptRoot '..\bin\browser-runtime')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,22 +11,21 @@ $stage = Join-Path $outputRoot "NodeHarbor-windows-$Version"
 $core = Join-Path $projectRoot 'bin\nodeharbor-core.exe'
 $archive = Join-Path $outputRoot "NodeHarbor-windows-$Version.zip"
 $notices = Join-Path $projectRoot 'THIRD_PARTY_NOTICES'
+$browserRuntime = [IO.Path]::GetFullPath($BrowserRuntimeDirectory)
 
 if (-not (Test-Path -LiteralPath $notices -PathType Leaf)) {
     throw 'THIRD_PARTY_NOTICES is missing'
 }
 $noticeText = Get-Content -Raw -LiteralPath $notices
 foreach ($requiredNotice in @(
-    'NodeHarbor bundles Mihomo v1.19.30 for Windows x64 and Android arm64-v8.',
+    'NodeHarbor bundles Mihomo v1.19.30 for Windows x64.',
     'Windows x64 asset: mihomo-windows-amd64-v1.19.30.zip',
     'Windows x64 archive SHA-256: 22C09FD67673895EF7CD6B1820563918275C3D316F2462B306208675118DB3C0',
     'Windows x64 executable SHA-256: F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761',
-    'Android arm64-v8 asset: mihomo-android-arm64-v8-v1.19.30.gz',
-    'Android arm64-v8 archive SHA-256: 19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD',
-    'Android arm64-v8 executable SHA-256: 94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD',
     'License: GNU General Public License v3.0 or later (GPL-3.0-or-later)',
     'Source: https://github.com/MetaCubeX/mihomo/tree/v1.19.30',
-    'License text: https://www.gnu.org/licenses/gpl-3.0.txt'
+    'License text: https://www.gnu.org/licenses/gpl-3.0.txt',
+    'NodeHarbor bundles Playwright Go v0.6201.1 and its pinned Chromium runtime for Windows x64.'
 )) {
     if (-not $noticeText.Contains($requiredNotice)) {
         throw "THIRD_PARTY_NOTICES is incomplete: missing '$requiredNotice'"
@@ -45,6 +45,9 @@ if (-not (Test-Path -LiteralPath $core)) {
 }
 $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $core).Hash
 if ($digest -ne 'F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761') { throw "Mihomo checksum mismatch: $digest" }
+if (-not (Test-Path -LiteralPath $browserRuntime -PathType Container) -or $null -eq (Get-ChildItem -LiteralPath $browserRuntime -Filter chrome.exe -File -Recurse | Select-Object -First 1)) {
+    & (Join-Path $projectRoot 'scripts\install-browser-runtime.ps1') -RuntimeDirectory $browserRuntime
+}
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -52,6 +55,7 @@ Push-Location $projectRoot
 try { go build -o (Join-Path $stage 'nodeharbor.exe') ./cmd/nodeharbor }
 finally { Pop-Location }
 Copy-Item -LiteralPath $core -Destination (Join-Path $stage 'nodeharbor-core.exe')
+Copy-Item -LiteralPath $browserRuntime -Destination (Join-Path $stage 'browser-runtime') -Recurse
 Copy-Item -LiteralPath $notices -Destination $stage
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stage
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }

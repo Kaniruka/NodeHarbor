@@ -34,7 +34,10 @@ func run() error {
 	listenAddress := flag.String("listen", "", "HTTP listen address; defaults to the persisted listener address and port")
 	dataDirectory := flag.String("data", "data", "directory containing persistent state")
 	listenerFile := flag.String("listener-file", "", "file for the actual loopback management listener URL")
-	launchBrowser := flag.Bool("open-browser", runtime.GOOS == "windows", "open the management UI in the default browser")
+	launchBrowser := flag.Bool("open-browser", true, "open the management UI in the default browser")
+	browserPath := flag.String("browser-path", "", "advanced: override the bundled Chromium executable")
+	browserDriver := flag.String("browser-driver", "", "advanced: override the bundled Playwright driver directory")
+	browserHeaded := flag.Bool("browser-headed", false, "advanced: show scoring pages while diagnosing provider failures")
 	testIPLarkEndpoint := flag.String("test-iplark-endpoint", "", "explicit deterministic smoke-test IPLark endpoint")
 	testIPSuperEndpoint := flag.String("test-ipsuper-endpoint", "", "explicit deterministic smoke-test IPSuper endpoint")
 	testIPv4IdentityEndpoint := flag.String("test-ipv4-identity-endpoint", "", "explicit deterministic smoke-test IPv4 Exit Identity endpoint")
@@ -45,17 +48,26 @@ func run() error {
 		fmt.Println(version)
 		return nil
 	}
+	if runtime.GOOS != "windows" {
+		return errors.New("NodeHarbor supports Windows 10/11 x64 only")
+	}
 
 	assets, err := webassets.Assets()
 	if err != nil {
 		return fmt.Errorf("open embedded WebUI: %w", err)
 	}
-	mihomoBuild, err := app.MihomoBuildForPlatform(runtime.GOOS)
-	if err != nil {
-		return err
-	}
-	kernel := app.NewMihomoKernelWithBuild(defaultMihomoPath(), mihomoBuild)
+	kernel := app.NewMihomoKernel(defaultMihomoPath())
 	dependencies := app.DefaultDependencies(kernel)
+	executable, _ := os.Executable()
+	runtimeRoot := filepath.Join(filepath.Dir(executable), "browser-runtime")
+	resolvedBrowserPath := *browserPath
+	if resolvedBrowserPath == "" {
+		resolvedBrowserPath = app.FindBundledChromium(runtimeRoot)
+	}
+	resolvedBrowserDriver := *browserDriver
+	if resolvedBrowserDriver == "" {
+		resolvedBrowserDriver = filepath.Join(runtimeRoot, "driver")
+	}
 	testEndpointsRequested := *testIPLarkEndpoint != "" || *testIPSuperEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
 	if testEndpointsRequested && os.Getenv("NODEHARBOR_PACKAGE_SMOKE") != "1" {
 		return errors.New("deterministic smoke endpoints require NODEHARBOR_PACKAGE_SMOKE=1")
@@ -68,6 +80,12 @@ func run() error {
 			IPv6IdentityEndpoint: *testIPv6IdentityEndpoint,
 		})
 	}
+	dependencies.BrowserRuntime = app.NewPlaywrightBrowserRuntime(app.BrowserRuntimeConfig{
+		DriverDirectory:      resolvedBrowserDriver,
+		ExecutablePath:       resolvedBrowserPath,
+		DiagnosticsDirectory: filepath.Join(*dataDirectory, "browser-diagnostics"),
+		Headless:             !*browserHeaded,
+	})
 	application, err := app.Open(context.Background(), app.Config{
 		DatabasePath: filepath.Join(*dataDirectory, "nodeharbor.db"),
 		WebAssets:    assets,
@@ -212,8 +230,5 @@ func defaultMihomoPath() string {
 }
 
 func openBrowser(url string) error {
-	if runtime.GOOS != "windows" {
-		return nil
-	}
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }

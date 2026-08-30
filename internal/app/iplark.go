@@ -18,17 +18,19 @@ import (
 // evaluation domain. Its HTTP client may be configured with a Test Channel's
 // transport by the platform assembly.
 type IPLarkProvider struct {
-	Client    *http.Client
-	Endpoint  string
-	UserAgent string
-	Timeout   time.Duration
+	Client               *http.Client
+	Endpoint             string
+	UserAgent            string
+	Timeout              time.Duration
+	IPv4IdentityEndpoint string
+	IPv6IdentityEndpoint string
 }
 
 func NewIPLarkProvider(client *http.Client) IPLarkProvider {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return IPLarkProvider{Client: client, Endpoint: "https://iplark.com/ipscore", UserAgent: "NodeHarbor/1.0", Timeout: 10 * time.Second}
+	return IPLarkProvider{Client: client, Endpoint: "https://iplark.com", UserAgent: "NodeHarbor/1.0", Timeout: 10 * time.Second, IPv4IdentityEndpoint: ipv4IdentityEndpoint, IPv6IdentityEndpoint: ipv6IdentityEndpoint}
 }
 
 func (provider IPLarkProvider) Name() string { return "iplark" }
@@ -197,10 +199,11 @@ func number(value any) (float64, bool) {
 }
 
 var iplarkHTMLScore = regexp.MustCompile(`(?is)^\s*<(?:div|span|p)[^>]*>\s*ip\s*score\s*<(?:strong|b|span)[^>]*>\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*</(?:strong|b|span)>\s*</(?:div|span|p)>\s*$`)
+var iplarkRenderedTextScore = regexp.MustCompile(`(?is)(?:ip\s*评分|ip\s*score)\s*[:：]?\s*([0-9]{1,3}(?:\.[0-9]+)?)`)
 
 func parseIPLarkHTML(body []byte) (float64, bool) {
 	content := strings.ToLower(string(body))
-	for _, marker := range []string{"captcha", "challenge", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked", "error"} {
+	for _, marker := range []string{"captcha", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked", "error"} {
 		if strings.Contains(content, marker) {
 			return 0, false
 		}
@@ -211,4 +214,24 @@ func parseIPLarkHTML(body []byte) (float64, bool) {
 	}
 	score, err := strconv.ParseFloat(string(match[1]), 64)
 	return score, err == nil && score >= 0 && score <= 100
+}
+
+func parseIPLarkRenderedText(body []byte) (float64, bool) {
+	content := string(body)
+	lower := strings.ToLower(content)
+	for _, marker := range []string{"captcha", "checking your browser", "just a moment", "verify you are human", "access denied", "forbidden", "blocked", "error"} {
+		if strings.Contains(lower, marker) {
+			return 0, false
+		}
+	}
+	match := iplarkRenderedTextScore.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0, false
+	}
+	score, err := strconv.ParseFloat(match[1], 64)
+	return score, err == nil && score >= 0 && score <= 100
+}
+
+func isIPLarkChallenge(body []byte) bool {
+	return strings.Contains(strings.ToLower(string(body)), "location.reload")
 }

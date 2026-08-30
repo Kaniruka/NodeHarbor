@@ -40,12 +40,12 @@ func TestMihomoTestChannelConfigOwnsLoopbackProxyAndControlPorts(t *testing.T) {
 	}
 }
 
-func TestFreeLoopbackPortAvoidsSurfingDefaultsAndExcludedPort(t *testing.T) {
+func TestFreeLoopbackPortAvoidsExcludedPort(t *testing.T) {
 	port, err := freeLoopbackPort(19092)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if IsSurfingDefaultPort(port) || port == 19092 {
-		t.Fatalf("selected unsafe Test Channel port %d", port)
+	if port == 19092 {
+		t.Fatalf("selected excluded Test Channel port %d", port)
 	}
 }

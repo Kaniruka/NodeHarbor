@@ -126,45 +126,47 @@ type TestChannelHTTPClient interface {
 	HTTPClient(context.Context, ProxyNode) (*http.Client, error)
 }
 
+type TestChannelBrowserProxy interface {
+	// BrowserProxyEndpoint returns a temporary loopback proxy bound to this node.
+	// Browser sessions must use this endpoint instead of the system proxy.
+	BrowserProxyEndpoint(context.Context, ProxyNode) (string, error)
+}
+
 type ChannelScoringProvider interface {
 	// ScoreWithClient must send the provider request through the supplied
 	// Test Channel HTTP client; direct provider clients are not accepted.
 	ScoreWithClient(context.Context, string, *http.Client) (float64, error)
 }
 
-type SurfingIsolationStatus struct {
-	Mode     string
-	Verified bool
-	Reason   string
+type BrowserPage struct {
+	URL        string
+	Title      string
+	Status     int
+	Text       string
+	HTML       string
+	Screenshot []byte
 }
 
-type SurfingIsolationGuard interface {
-	Check(context.Context) (SurfingIsolationStatus, error)
+type BrowserRuntime interface {
+	Fetch(context.Context, string, []string) ([]BrowserPage, error)
+	Close() error
 }
 
-// SurfingRuntimeInspection is the read-only platform observation used to
-// decide whether an Evaluation Run can safely use an isolated Test Channel.
-// The inspection deliberately contains proof results rather than commands:
-// NodeHarbor never changes Surfing configuration, processes, or routing.
-type SurfingRuntimeInspection struct {
-	Detected                  bool
-	Mode                      string
-	ProcessIdentityVerified   bool
-	TestChannelBypassVerified bool
-	ProbeTargetBypassVerified bool
+// BrowserRuntimeSearch executes a provider's rendered search flow in the same
+// Browser Context as the Exit Identity check.
+type BrowserRuntimeSearch interface {
+	FetchWithInput(context.Context, string, string, string, string) ([]BrowserPage, error)
 }
 
-// SurfingRuntimeInspector observes platform state without owning or
-// modifying Surfing. It is injectable so the platform contract is testable.
-type SurfingRuntimeInspector interface {
-	Inspect(context.Context) (SurfingRuntimeInspection, error)
+type BrowserRuntimeTextWait interface {
+	FetchUntilText(context.Context, string, []string, []string) ([]BrowserPage, error)
 }
 
-// SurfingProbeTargetVerifier independently checks that the local target used
-// to prove the Test Channel bypass is reached directly.
-type SurfingProbeTargetVerifier interface {
-	Verify(context.Context) (bool, error)
+type BrowserScoringProvider interface {
+	ScoreWithBrowser(context.Context, string, string, BrowserRuntime) (float64, error)
 }
+
+var errBrowserRuntimeUnavailable = errors.New("managed browser runtime unavailable")
 
 type UpstreamRequest struct {
 	Location  string
@@ -193,7 +195,7 @@ type Dependencies struct {
 	ScoringProviders map[string]ScoringProvider
 	Kernel           Kernel
 	TestChannel      TestChannel
-	Isolation        SurfingIsolationGuard
+	BrowserRuntime   BrowserRuntime
 }
 
 type Config struct {
@@ -353,6 +355,9 @@ func (application *Application) Close() error {
 	closeErr := application.database.Close()
 	if channel, ok := application.dependencies.TestChannel.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, channel.Close())
+	}
+	if application.dependencies.BrowserRuntime != nil {
+		closeErr = errors.Join(closeErr, application.dependencies.BrowserRuntime.Close())
 	}
 	return closeErr
 }

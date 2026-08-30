@@ -1,6 +1,6 @@
 # Proxy Subscription Curation
 
-This context describes how upstream proxy subscriptions are evaluated and transformed into a curated subscription for personal use.
+This context describes how upstream proxy subscriptions are evaluated and transformed into a curated subscription for personal use on a Windows desktop.
 
 ## Language
 
@@ -51,3 +51,23 @@ _Avoid_: Merged configuration, airport subscription
 **Publication Snapshot**:
 A complete, validated version of the published subscription that replaces the previous version as one indivisible result.
 _Avoid_: Partial output, working file
+
+**Desktop Runtime**:
+The local Windows environment in which NodeHarbor evaluates proxy nodes and publishes a curated subscription.
+_Avoid_: Android runtime, mobile runtime, server runtime
+
+**Managed Browser Runtime**:
+A versioned browser environment used to evaluate scoring websites that require rendered browser behavior.
+_Avoid_: Default browser, WebUI browser, HTTP client
+
+**Browser Context**:
+An isolated browser session state used for one proxy-node and scoring-provider combination.
+_Avoid_: Browser tab, shared profile, browser process
+
+**Browser Proxy Endpoint**:
+A temporary local proxy entry that routes a Managed Browser Runtime session through one Test Channel.
+_Avoid_: System proxy, global proxy, upstream subscription
+
+**Browser Scoring Session**:
+The bounded activity that uses one Browser Context to verify an Exit Identity and obtain one provider-specific IP Score.
+_Avoid_: Browser visit, web scrape, generic score request

@@ -1,9 +1,9 @@
 # NodeHarbor Design Specification
 
 - Status: Confirmed for implementation
-- Version: 0.2
-- Frozen on: 2026-08-28
-- Implementation: Not started
+- Version: 0.3
+- Frozen on: 2026-08-30
+- Implementation: In progress
 
 This document records the product and engineering decisions agreed during the design interview. The domain vocabulary in [`CONTEXT.md`](../CONTEXT.md) is normative.
 
@@ -15,26 +15,24 @@ The first release targets personal use rather than a hosted multi-user service. 
 
 ## 2. Supported platforms and deliverables
 
-- Windows 10/11 x64 as a ZIP archive.
-- KernelSU on Android arm64-v8 as a module ZIP.
-- Chromium-based browsers and Android Chromium WebView.
+- Windows 10/11 x64 as a self-contained ZIP archive.
+- A pinned Chromium-based Managed Browser Runtime included in the Windows package.
 - Project license: MIT.
-- Product and KernelSU module ID: `NodeHarbor` / `nodeharbor`.
+- Product ID: `NodeHarbor` / `nodeharbor`.
 - User interface languages: Simplified Chinese and English, selected from the browser locale.
 
-The Windows build is a persistent executable that starts the local server and opens the browser. It does not install a Windows service and does not configure automatic startup.
-
-The KernelSU build starts its daemon from `service.sh`. Scheduled work continues while the WebUI is closed. The WebUI is a control surface, not a process supervisor.
+The Windows build is a persistent executable that starts the local server and opens the management UI in the user's default browser. It does not install a Windows service and does not configure automatic startup. The Managed Browser Runtime is started and supervised only when scoring requires it.
 
 ## 3. Technology baseline
 
 - Backend: Go.
 - Frontend: React, TypeScript, and Vite.
 - Persistence: SQLite.
-- Proxy engine: a pinned, bundled Mihomo binary for each target platform.
-- Frontend output: static assets shared by the Windows web server and KernelSU `webroot`.
+- Proxy engine: a pinned, bundled Windows Mihomo binary.
+- Scoring runtime: a pinned, bundled Chromium and Playwright Go integration.
+- Frontend output: static assets embedded by the Windows web server.
 
-Every release pins the Mihomo version, verifies its SHA-256 digest, and includes its license in `THIRD_PARTY_NOTICES`. Other bundled assets require separate license review.
+Every release pins the Mihomo and Chromium/Playwright versions, verifies distributable digests where available, and includes their licenses in `THIRD_PARTY_NOTICES`.
 
 ## 4. Capacity and input
 
@@ -60,12 +58,12 @@ The pipeline is:
 3. Validate candidates with the bundled Mihomo engine.
 4. Perform the availability check.
 5. Determine the actual exit identity through the test channel.
-6. Reuse a valid score cache entry or query the selected scoring provider.
+6. Reuse a valid score cache entry or open a Browser Scoring Session for the selected scoring provider.
 7. Select qualified nodes.
 8. Generate and validate a complete publication snapshot.
 9. Atomically replace the previous published subscription.
 
-Node-level checks use at most three concurrent workers and add a small randomized delay between scoring-provider requests. The implementation may lower concurrency when a provider or platform requires stricter serialization.
+Node-level checks use at most three concurrent workers and add a small randomized delay between scoring-provider requests. Browser scoring defaults to one concurrent Browser Scoring Session and may be raised to three through advanced configuration.
 
 ## 6. Availability check
 
@@ -98,7 +96,9 @@ If a new exit identity cannot be scored, its nodes are excluded. If a previous s
 
 IPLark was observed to request `/ipscore`; arbitrary-IP pages request `/ipscore?ip=<address>&token=<page token>`. Direct non-browser requests can receive HTTP 403. IPSuper is queried through its public page in a bounded Test Channel session; neither source is treated as a documented, stable bulk-scoring API.
 
-NodeHarbor therefore uses replaceable, best-effort provider adapters. It does not bundle a headless browser. Adapter failures, anti-bot challenges, token changes, rate limits, and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
+NodeHarbor therefore uses replaceable, best-effort provider adapters backed by the Managed Browser Runtime. Each Browser Scoring Session creates a fresh Browser Context for one Proxy Node and Scoring Provider, verifies the Exit Identity through the same Browser Proxy Endpoint, renders the provider page, and extracts a provider-specific score from the DOM. The default navigation/rendering deadline is 15 seconds. Transport or browser-process failure may be retried once; HTTP 403, CAPTCHA, challenge, rate limit, or missing score is not retried. Adapter failures and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
+
+The browser runs headless by default and can be switched to headed diagnostic mode. Its debug interface binds only to loopback on a random port. Browser Context state is ephemeral: cookies, LocalStorage, cache, and credentials are not reused between sessions.
 
 ## 8. Stale and failed inputs
 
@@ -141,7 +141,7 @@ The port is configurable. The local root path `/` serves the management UI. LAN 
 
 NodeHarbor assumes a trusted single-user host and trusted LAN. It does not add an authentication token to the published subscription URL. Subscription URLs, proxy credentials, and logs are not masked by the application.
 
-The management surface remains loopback-only. Enabling LAN management is outside the first-release scope. Platform file permissions should restrict local state to the current Windows user or the KernelSU module environment.
+The management surface remains loopback-only. Enabling LAN management is outside the first-release scope. Platform file permissions should restrict local state to the current Windows user.
 
 ## 12. WebUI scope
 
@@ -151,7 +151,7 @@ The responsive, mobile-first WebUI contains:
 2. Upstream subscriptions: add, edit, refresh, remove, and view errors.
 3. Nodes: availability, median latency, exit IP, address family, score, provider, and qualification result.
 4. History: evaluation results retained for the configured three-to-seven-day window.
-5. Settings and logs: thresholds, schedule, retention, port, provider, test URLs, cache controls, and diagnostics.
+5. Settings and logs: thresholds, schedule, retention, port, provider, test URLs, cache controls, browser runtime health, diagnostic mode, and diagnostics.
 
 Accounts, complex charts, a theme marketplace, drag-and-drop workflow editing, and a general YAML editor are excluded.
 
@@ -161,46 +161,31 @@ NodeHarbor never enables TUN, changes the operating-system proxy, or installs tr
 
 The application owns and supervises only its bundled core. It uses a distinct executable/process name, data directory, control socket or port, PID file, and log files. It never uses broad commands such as `killall mihomo` and never edits another proxy application's configuration.
 
-## 14. Surfing coexistence on KernelSU
+## 14. Windows process and browser isolation
 
-Surfing may run another Mihomo instance and may install REDIRECT, TPROXY, DNS, or TUN routing. NodeHarbor must coexist without modifying Surfing's module, `/data/adb/box_bll`, firewall chains, route tables, configuration, processes, or ports.
+NodeHarbor owns and supervises only its bundled Mihomo core and Managed Browser Runtime. It uses distinct process names, data directories, control endpoints, PID ownership checks, and log files. It never changes the Windows system proxy, starts a TUN, exposes a browser debug interface to LAN clients, or controls a foreign browser or proxy process.
 
-Required isolation:
+For each Proxy Node, the Test Channel provides a temporary loopback Browser Proxy Endpoint. The Browser Context must use that endpoint explicitly; inability to create or verify it fails closed. A missing or unrecoverable Managed Browser Runtime marks the run `runtime_unavailable`, preserves the previous Publication Snapshot, and does not turn every node into a false low-score result.
 
-- Use module ID `nodeharbor` and a NodeHarbor-owned data directory.
-- Use a renamed core executable such as `nodeharbor-core` and exact PID ownership checks.
-- Avoid Surfing's known default ports, including 7890, 7891, 1536, 1053, and 9090.
-- Probe every intended listener before starting and choose internal test ports dynamically.
-- Bind core control surfaces to loopback only.
-- Detect Surfing and, where safe, launch NodeHarbor networking processes with the UID/GID identity that Surfing already exempts from REDIRECT/TPROXY interception.
-- Verify the observed exit identity before accepting a score or publishing a new snapshot.
-- Fail closed: uncertainty about routing isolation pauses publication and preserves the previous snapshot.
-
-### 14.1 Accepted behavior: Surfing TUN mode
-
-Surfing's TUN mode may recapture NodeHarbor's underlying proxy-engine connections at the routing layer even when UID/GID bypass works for REDIRECT or TPROXY.
-
-The first release detects active Surfing TUN mode, pauses evaluation, displays an incompatibility warning, and continues serving the previous publication snapshot. It does not modify or stop Surfing. Supporting simultaneous Surfing TUN evaluation would require a separately designed and device-tested network-namespace or physical-interface binding solution.
+Failure evidence is limited to the latest 20 provider failures and expires after 24 hours. It may include status summaries, page titles, HTTP status, error reasons, and screenshots, but never cookies, LocalStorage, credentials, or complete network captures.
 
 ## 15. Failure guarantees
 
 - No scoring-provider outage may erase a previously valid publication.
 - No partial YAML may be served.
-- No NodeHarbor stop, update, or uninstall action may stop Surfing or another Mihomo process.
-- No Surfing stop, reload, or update may cause NodeHarbor to adopt or kill a foreign process.
 - A failed evaluation records a diagnosable status and leaves the last good publication available.
 
 ## 16. Initial acceptance criteria
 
-- Windows x64 and KernelSU arm64-v8 packages start their respective local WebUI and background service.
+- The Windows x64 package starts the local WebUI and bundled Mihomo core.
+- The package contains the pinned Managed Browser Runtime or reports an actionable runtime-unavailable error.
 - The system accepts up to 10 Clash/Mihomo YAML inputs and safely evaluates approximately 500 nodes.
 - Availability checks precede scoring and enforce the configured success, timeout, and latency rules.
-- A provider adapter can obtain and cache an IPLark score when the website permits it, and degrades safely when it does not.
+- Browser-backed IPSuper and IPLark adapters can obtain and cache provider-specific scores when the website permits it, and degrade safely when it does not.
+- Browser scoring uses an isolated Context and the verified Browser Proxy Endpoint, with deterministic local fixture coverage and an explicit non-CI live smoke test.
 - The output contains only qualified nodes and the three generated groups, and the bundled Mihomo accepts it.
 - LAN clients can fetch the published subscription but cannot reach management APIs.
 - Publication remains unchanged after an upstream-wide failure, provider-wide failure, invalid generated YAML, or process interruption.
-- With Surfing in REDIRECT or TPROXY mode, neither module modifies, stops, or adopts the other's process, configuration, ports, or routing state.
-- With Surfing TUN mode active, NodeHarbor pauses evaluation, reports the incompatibility, and continues serving the previous publication snapshot.
 
 ## 17. Explicitly excluded from the first release
 
@@ -211,6 +196,5 @@ The first release detects active Surfing TUN mode, pauses evaluation, displays a
 - System proxy or TUN management by NodeHarbor.
 - Manual node exclusion and force inclusion.
 - Windows service or automatic startup.
-- Automatic Mihomo binary updates.
-- Headless-browser automation for scoring websites.
-- Simultaneous evaluation while Surfing TUN mode is active.
+- Automatic Mihomo or browser-runtime updates.
+- Automatic CAPTCHA solving or user-assisted challenge completion.

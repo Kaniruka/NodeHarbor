@@ -53,29 +53,3 @@ jobs:
           $package = Join-Path $env:RUNNER_TEMP 'nodeharbor-package'
           Expand-Archive -LiteralPath "dist\NodeHarbor-windows-$env:GITHUB_SHA.zip" -DestinationPath $package
           .\scripts\smoke-windows.ps1 -PackageDirectory $package
-
-  kernelsu:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Download pinned arm64 Mihomo core
-        shell: bash
-        run: |
-          archive="$RUNNER_TEMP/mihomo-android-arm64-v8-v1.19.30.gz"
-          core="$RUNNER_TEMP/nodeharbor-core"
-          curl --fail --location --silent --show-error \
-            'https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-android-arm64-v8-v1.19.30.gz' \
-            --output "$archive"
-          echo '19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD  '"$archive" | sha256sum --check
-          gzip --decompress --stdout "$archive" > "$core"
-          chmod 755 "$core"
-      - name: Build and smoke-test KernelSU package contract
-        shell: pwsh
-        run: |
-          ./scripts/package-kernelsu.ps1 -MihomoPath "$env:RUNNER_TEMP/nodeharbor-core" -Version 0.2.0
-          $package = Join-Path $env:RUNNER_TEMP 'nodeharbor-kernelsu-package'
-          Expand-Archive -LiteralPath 'dist/NodeHarbor-kernelsu-0.2.0.zip' -DestinationPath $package
-          ./scripts/smoke-kernelsu.ps1 -PackageDirectory $package

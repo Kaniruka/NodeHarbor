@@ -19,17 +19,8 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	iplark := NewIPLarkProvider(nil)
 	ipsuper := NewIPSuperProvider(nil)
 	testChannel := TestChannel(UnavailableTestChannel{})
-	var isolation SurfingIsolationGuard = InactiveSurfingIsolation{}
 	if mihomo, ok := kernel.(MihomoKernel); ok {
-		if mihomo.build.Platform == KernelSUMihomoBuild.Platform && mihomo.executablePath != "" {
-			moduleDirectory := filepath.Dir(filepath.Dir(mihomo.executablePath))
-			testChannel = NewMihomoTestChannelWithDataDirectory(mihomo.executablePath, mihomo.build, filepath.Join(moduleDirectory, "data", "test-channels"))
-		} else {
-			testChannel = NewMihomoTestChannel(mihomo.executablePath, mihomo.build)
-		}
-		if mihomo.build.Platform == KernelSUMihomoBuild.Platform {
-			isolation = NewKernelSUSurfingIsolation()
-		}
+		testChannel = NewMihomoTestChannel(mihomo.executablePath, mihomo.build)
 	}
 	return Dependencies{
 		Upstream:         NewHTTPUpstream(30 * time.Second),
@@ -37,7 +28,6 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipsuper": ipsuper},
 		Kernel:           kernel,
 		TestChannel:      testChannel,
-		Isolation:        isolation,
 	}
 }
 
@@ -68,6 +58,19 @@ func DefaultDependenciesWithTestEndpoints(kernel Kernel, config TestEndpointConf
 			dependencies.ScoringProviders["ipsuper"] = provider
 		}
 	}
+	if provider, ok := dependencies.ScoringProviders["iplark"].(IPLarkProvider); ok {
+		provider.IPv4IdentityEndpoint = endpointOrDefault(config.IPv4IdentityEndpoint, ipv4IdentityEndpoint)
+		provider.IPv6IdentityEndpoint = endpointOrDefault(config.IPv6IdentityEndpoint, ipv6IdentityEndpoint)
+		dependencies.ScoringProviders["iplark"] = provider
+		if _, ok := dependencies.Scoring.(IPLarkProvider); ok {
+			dependencies.Scoring = provider
+		}
+	}
+	if provider, ok := dependencies.ScoringProviders["ipsuper"].(IPSuperProvider); ok {
+		provider.IPv4IdentityEndpoint = endpointOrDefault(config.IPv4IdentityEndpoint, ipv4IdentityEndpoint)
+		provider.IPv6IdentityEndpoint = endpointOrDefault(config.IPv6IdentityEndpoint, ipv6IdentityEndpoint)
+		dependencies.ScoringProviders["ipsuper"] = provider
+	}
 	if channel, ok := dependencies.TestChannel.(*MihomoTestChannel); ok {
 		channel.ipv4IdentityEndpoint = endpointOrDefault(config.IPv4IdentityEndpoint, ipv4IdentityEndpoint)
 		channel.ipv6IdentityEndpoint = endpointOrDefault(config.IPv6IdentityEndpoint, ipv6IdentityEndpoint)
@@ -80,76 +83,6 @@ func endpointOrDefault(endpoint, fallback string) string {
 		return fallback
 	}
 	return endpoint
-}
-
-type UnavailableSurfingIsolation struct{}
-
-func (UnavailableSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
-	return SurfingIsolationStatus{Mode: "unknown", Reason: "Surfing isolation status is unavailable"}, nil
-}
-
-// InactiveSurfingIsolation is the platform result for targets where NodeHarbor
-// does not have a Surfing runtime to inspect. Keeping this result explicit
-// prevents the production dependency assembly from silently looking like a
-// partially configured test assembly.
-type InactiveSurfingIsolation struct{}
-
-func (InactiveSurfingIsolation) Check(context.Context) (SurfingIsolationStatus, error) {
-	return SurfingIsolationStatus{Mode: "inactive", Verified: true, Reason: "Surfing is not active on this platform"}, nil
-}
-
-// KernelSUSurfingIsolation converts the platform's read-only observations
-// into the guard contract consumed before every Evaluation Run.
-type KernelSUSurfingIsolation struct {
-	inspector SurfingRuntimeInspector
-}
-
-func NewKernelSUSurfingIsolation(inspectors ...SurfingRuntimeInspector) KernelSUSurfingIsolation {
-	if len(inspectors) > 0 && inspectors[0] != nil {
-		return KernelSUSurfingIsolation{inspector: inspectors[0]}
-	}
-	return KernelSUSurfingIsolation{inspector: ProcSurfingRuntimeInspector{}}
-}
-
-func (guard KernelSUSurfingIsolation) Check(ctx context.Context) (SurfingIsolationStatus, error) {
-	inspection, err := guard.inspector.Inspect(ctx)
-	if err != nil {
-		return SurfingIsolationStatus{Mode: "unknown", Reason: fmt.Sprintf("inspect Surfing isolation: %v", err)}, nil
-	}
-	mode := strings.ToLower(strings.TrimSpace(inspection.Mode))
-	if mode == "" {
-		mode = "unknown"
-	}
-	if !inspection.Detected && mode == "inactive" {
-		return SurfingIsolationStatus{Mode: mode, Verified: true, Reason: "Surfing is not active"}, nil
-	}
-	if mode == "tun" {
-		return SurfingIsolationStatus{Mode: mode, Reason: "Surfing TUN is active"}, nil
-	}
-	if mode != "redirect" && mode != "tproxy" {
-		return SurfingIsolationStatus{Mode: mode, Reason: "Surfing isolation mode is unknown"}, nil
-	}
-	if !inspection.ProcessIdentityVerified {
-		return SurfingIsolationStatus{Mode: mode, Reason: "NodeHarbor process identity is not verified for Surfing bypass"}, nil
-	}
-	if !inspection.TestChannelBypassVerified {
-		return SurfingIsolationStatus{Mode: mode, Reason: "Test Channel bypass is not verified"}, nil
-	}
-	if !inspection.ProbeTargetBypassVerified {
-		return SurfingIsolationStatus{Mode: mode, Reason: "probe-target bypass is not verified"}, nil
-	}
-	return SurfingIsolationStatus{Mode: mode, Verified: true, Reason: "Surfing transparent-proxy bypass verified"}, nil
-}
-
-var SurfingDefaultPorts = []int{7890, 7891, 1536, 1053, 9090}
-
-func IsSurfingDefaultPort(port int) bool {
-	for _, candidate := range SurfingDefaultPorts {
-		if port == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 type UnavailableUpstream struct{}
@@ -227,23 +160,12 @@ var WindowsMihomoBuild = MihomoBuild{
 	LicenseIdentifier: "GPL-3.0-or-later",
 }
 
-var KernelSUMihomoBuild = MihomoBuild{
-	Platform:          "android-arm64-v8",
-	Version:           "v1.19.30",
-	Asset:             "mihomo-android-arm64-v8-v1.19.30.gz",
-	ArchiveSHA256:     "19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD",
-	ExecutableSHA256:  "94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD",
-	LicenseIdentifier: "GPL-3.0-or-later",
-}
-
 const MihomoVersion = "v1.19.30"
 
 func MihomoBuildForPlatform(platform string) (MihomoBuild, error) {
 	switch platform {
 	case "windows":
 		return WindowsMihomoBuild, nil
-	case "android":
-		return KernelSUMihomoBuild, nil
 	default:
 		return MihomoBuild{}, fmt.Errorf("unsupported Mihomo platform %q", platform)
 	}

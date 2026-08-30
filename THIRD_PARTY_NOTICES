@@ -1,13 +1,14 @@
-NodeHarbor bundles Mihomo v1.19.30 for Windows x64 and Android arm64-v8.
+NodeHarbor bundles Mihomo v1.19.30 for Windows x64.
 
 Windows x64 asset: mihomo-windows-amd64-v1.19.30.zip
 Windows x64 archive SHA-256: 22C09FD67673895EF7CD6B1820563918275C3D316F2462B306208675118DB3C0
 Windows x64 executable SHA-256: F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761
 
-Android arm64-v8 asset: mihomo-android-arm64-v8-v1.19.30.gz
-Android arm64-v8 archive SHA-256: 19AFEB40FCA190FC2E3906A4E3B87C74A0C2120626FD3CB3AE0CF4092CB780AD
-Android arm64-v8 executable SHA-256: 94344144936968F25E7089BBEAC2D87F3CAF67574BA433511424724AD7435DAD
-
-License: GNU General Public License v3.0 or later (GPL-3.0-or-later), applying to both bundled cores.
+License: GNU General Public License v3.0 or later (GPL-3.0-or-later).
 Source: https://github.com/MetaCubeX/mihomo/tree/v1.19.30
 License text: https://www.gnu.org/licenses/gpl-3.0.txt
+
+NodeHarbor bundles Playwright Go v0.6201.1 and its pinned Chromium runtime for Windows x64.
+Playwright Go license: MIT
+Playwright Go source: https://github.com/mxschmitt/playwright-go
+Chromium license notice: included with the browser-runtime distribution.

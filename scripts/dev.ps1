@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $binDirectory = Join-Path $projectRoot 'bin'
 $corePath = Join-Path $binDirectory 'nodeharbor-core.exe'
+$browserRuntime = Join-Path $binDirectory 'browser-runtime'
 
 if (-not (Test-Path -LiteralPath $corePath)) {
     New-Item -ItemType Directory -Path $binDirectory -Force | Out-Null
@@ -26,6 +27,9 @@ $actualCoreDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $corePath).Hash
 $expectedCoreDigest = 'F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761'
 if ($actualCoreDigest -ne $expectedCoreDigest) {
     throw "Mihomo executable checksum mismatch: $actualCoreDigest"
+}
+if (-not (Test-Path -LiteralPath $browserRuntime -PathType Container) -or $null -eq (Get-ChildItem -LiteralPath $browserRuntime -Filter chrome.exe -File -Recurse | Select-Object -First 1)) {
+    & (Join-Path $projectRoot 'scripts\install-browser-runtime.ps1') -RuntimeDirectory $browserRuntime
 }
 
 Push-Location (Join-Path $projectRoot 'web')

@@ -175,6 +175,32 @@ func (channel *MihomoTestChannel) HTTPClient(ctx context.Context, node ProxyNode
 	return lease.client, nil
 }
 
+func (channel *MihomoTestChannel) BrowserProxyEndpoint(ctx context.Context, node ProxyNode) (string, error) {
+	key, err := mihomoNodeKey(node)
+	if err != nil {
+		return "", err
+	}
+	channel.mu.Lock()
+	defer channel.mu.Unlock()
+	lease := channel.leases[key]
+	if lease == nil {
+		var startErr error
+		lease, startErr = channel.startLease(ctx, node)
+		if startErr != nil {
+			return "", startErr
+		}
+		channel.leases[key] = lease
+	}
+	owned, ownershipErr := listenerOwnedBy(ctx, lease.address, lease.pid)
+	if ownershipErr != nil {
+		return "", ownershipErr
+	}
+	if !owned {
+		return "", errors.New("Mihomo Test Channel listener ownership could not be reverified")
+	}
+	return "http://" + lease.address, nil
+}
+
 // Release tears down the isolated core after this Proxy Node has finished its
 // evaluation. The application calls it even when Availability Check fails.
 func (channel *MihomoTestChannel) Release(node ProxyNode) error {
@@ -371,12 +397,21 @@ func freeLoopbackPort(excluded ...int) (int, error) {
 		}
 		port := listener.Addr().(*net.TCPAddr).Port
 		_ = listener.Close()
-		if IsSurfingDefaultPort(port) || containsInt(excluded, port) {
+		if containsInt(excluded, port) {
 			continue
 		}
 		return port, nil
 	}
 	return 0, errors.New("reserve Test Channel port: no safe loopback port available")
+}
+
+func containsInt(values []int, want int) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func mihomoNodeKey(node ProxyNode) (string, error) {

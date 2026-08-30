@@ -5,6 +5,9 @@ $root = [IO.Path]::GetFullPath($PackageDirectory)
 $executable = Join-Path $root 'nodeharbor.exe'
 $core = Join-Path $root 'nodeharbor-core.exe'
 $notices = Join-Path $root 'THIRD_PARTY_NOTICES'
+$browserRuntime = Join-Path $root 'browser-runtime'
+$browserDriver = Join-Path $browserRuntime 'driver'
+$browserBinaries = Join-Path $browserRuntime 'browsers'
 $expectedCoreDigest = 'F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761'
 $expectedFiles = @('README.md', 'THIRD_PARTY_NOTICES', 'nodeharbor-core.exe', 'nodeharbor.exe')
 $generatedPaths = @('smoke-data', 'smoke-fake.ready', 'smoke-fake.mode') | ForEach-Object { Join-Path $root $_ }
@@ -19,13 +22,17 @@ foreach ($requiredFile in @($executable, $core, $notices)) {
         throw "Package file is missing: $requiredFile"
     }
 }
-$actualDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Directory)
-if ($actualDirectories.Count -ne 0) {
-    throw "Package contains unexpected directories: $($actualDirectories.FullName -join ', ')"
+foreach ($requiredDirectory in @($browserRuntime, $browserDriver, $browserBinaries)) {
+    if (-not (Test-Path -LiteralPath $requiredDirectory -PathType Container)) {
+        throw "Package directory is missing: $requiredDirectory"
+    }
 }
-$actualFiles = @(Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length).TrimStart('\') } | Sort-Object)
-if (@(Compare-Object $expectedFiles $actualFiles).Count -ne 0) {
-    throw "Package contains unexpected or missing files: $($actualFiles -join ', ')"
+if ($null -eq (Get-ChildItem -LiteralPath $browserBinaries -Filter chrome.exe -File -Recurse | Select-Object -First 1)) {
+    throw 'Package browser runtime does not contain chrome.exe'
+}
+$actualRootFiles = @(Get-ChildItem -LiteralPath $root -File | ForEach-Object { $_.Name } | Sort-Object)
+if (@(Compare-Object $expectedFiles $actualRootFiles).Count -ne 0) {
+    throw "Package contains unexpected or missing root files: $($actualRootFiles -join ', ')"
 }
 $actualCoreDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $core).Hash.ToUpperInvariant()
 if ($actualCoreDigest -ne $expectedCoreDigest) {
@@ -33,12 +40,13 @@ if ($actualCoreDigest -ne $expectedCoreDigest) {
 }
 $noticeText = Get-Content -Raw -LiteralPath $notices
 foreach ($requiredNotice in @(
-    'NodeHarbor bundles Mihomo v1.19.30 for Windows x64 and Android arm64-v8.',
+    'NodeHarbor bundles Mihomo v1.19.30 for Windows x64.',
     'Windows x64 asset: mihomo-windows-amd64-v1.19.30.zip',
     'Windows x64 executable SHA-256: F55B3028D9160BEB9044F21B05DD7405B46524614A19642D6291492F5F985761',
     'License: GNU General Public License v3.0 or later (GPL-3.0-or-later)',
     'Source: https://github.com/MetaCubeX/mihomo/tree/v1.19.30',
-    'License text: https://www.gnu.org/licenses/gpl-3.0.txt'
+    'License text: https://www.gnu.org/licenses/gpl-3.0.txt',
+    'NodeHarbor bundles Playwright Go v0.6201.1 and its pinned Chromium runtime for Windows x64.'
 )) {
     if (-not $noticeText.Contains($requiredNotice)) {
         throw "THIRD_PARTY_NOTICES is incomplete: missing '$requiredNotice'"
