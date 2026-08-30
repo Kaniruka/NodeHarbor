@@ -136,3 +136,26 @@ func TestHTTPUpstreamConvertsBase64HysteriaURIToYAML(t *testing.T) {
 		t.Fatalf("converted document = %q", decoded)
 	}
 }
+
+func TestHTTPUpstreamConvertsTrojanURIWithPasswordOnlyUserinfo(t *testing.T) {
+	uriList := "trojan://secret-password@proxy.example:8080?allowInsecure=1&sni=cdn.example&type=tcp#Trojan%20Node\n"
+	encodedList := base64.StdEncoding.EncodeToString([]byte(uriList))
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte(encodedList))
+	}))
+	defer server.Close()
+
+	decoded, _, err := NewHTTPUpstream(time.Second).FetchWithMetadata(context.Background(), UpstreamRequest{Location: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(decoded, &document); err != nil {
+		t.Fatalf("converted document is not valid YAML: %v", err)
+	}
+	if len(document.Proxies) != 1 || document.Proxies[0]["password"] != "secret-password" || document.Proxies[0]["skip-cert-verify"] != true {
+		t.Fatalf("converted proxy = %#v", document.Proxies)
+	}
+}

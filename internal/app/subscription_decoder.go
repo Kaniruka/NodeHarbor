@@ -179,6 +179,9 @@ func parseTrojanURI(parsed *url.URL) (map[string]any, bool) {
 	}
 	password, ok := parsed.User.Password()
 	if !ok || password == "" {
+		password = parsed.User.Username()
+	}
+	if password == "" {
 		return nil, false
 	}
 	port, ok := parsedPort(parsed)
@@ -188,6 +191,9 @@ func parseTrojanURI(parsed *url.URL) (map[string]any, bool) {
 	query := parsed.Query()
 	proxy := map[string]any{"name": proxyURIName(parsed, "Trojan"), "type": "trojan", "server": parsed.Hostname(), "port": port, "password": password, "tls": true}
 	addTransportOptions(proxy, query.Get("type"), query.Get("path"), query.Get("host"), firstNonEmpty(query.Get("sni"), query.Get("peer")))
+	if allowInsecure := strings.ToLower(firstNonEmpty(query.Get("allowinsecure"), query.Get("allowInsecure"), query.Get("insecure"))); allowInsecure == "1" || allowInsecure == "true" {
+		proxy["skip-cert-verify"] = true
+	}
 	return proxy, true
 }
 
