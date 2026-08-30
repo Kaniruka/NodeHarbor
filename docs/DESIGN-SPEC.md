@@ -94,7 +94,7 @@ If a new exit identity cannot be scored, its nodes are excluded. If a previous s
 
 ### 7.1 Website-adapter constraint
 
-IPLark was observed to request `/ipscore`; arbitrary-IP pages request `/ipscore?ip=<address>&token=<page token>`. Direct non-browser requests can receive HTTP 403. IPSuper is queried through its public page in a bounded Test Channel session; neither source is treated as a documented, stable bulk-scoring API.
+IPLark's current rendered flow starts at `/search`, submits the target IP, and then routes to an address page such as `/<address>`; legacy `/ipscore` requests may redirect or return HTTP 404. Direct non-browser requests can receive HTTP 403, and a Secbit challenge page may keep reloading without a score. IPSuper is queried through its public page in a bounded Test Channel session; neither source is treated as a documented, stable bulk-scoring API.
 
 NodeHarbor therefore uses replaceable, best-effort provider adapters backed by the Managed Browser Runtime. Each Browser Scoring Session creates a fresh Browser Context for one Proxy Node and Scoring Provider, verifies the Exit Identity through the same Browser Proxy Endpoint, renders the provider page, and extracts a provider-specific score from the DOM. The default navigation/rendering deadline is 15 seconds. Transport or browser-process failure may be retried once; HTTP 403, CAPTCHA, challenge, rate limit, or missing score is not retried. Adapter failures and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
 
