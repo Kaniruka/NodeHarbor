@@ -122,13 +122,14 @@ test("Nodes has one global evaluation control and compact grouped cards", async 
 test("Nodes starts one global run and disables the control while it is running", async () => {
   let run = { ...currentRun, status: "completed" };
   let starts = 0;
+  let requestBody = "";
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json(settings);
     if (url.endsWith("/api/upstream-subscriptions")) return Response.json([source]);
     if (url.endsWith("/api/upstream-subscriptions/source-1/nodes")) return Response.json([]);
     if (url.endsWith("/api/evaluation-runs/current")) return Response.json(run);
-    if (url.endsWith("/api/evaluation-runs") && init?.method === "POST") { starts++; run = { ...run, status: "running" }; return Response.json(run, { status: 202 }); }
+    if (url.endsWith("/api/evaluation-runs") && init?.method === "POST") { starts++; requestBody = String(init.body); run = { ...run, status: "running" }; return Response.json(run, { status: 202 }); }
     throw new Error(`unexpected request: ${url}`);
   });
   render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
@@ -137,6 +138,7 @@ test("Nodes starts one global run and disables the control while it is running",
   const startButton = startButtons[0];
   await userEvent.click(startButton);
   expect(starts).toBe(1);
+  expect(JSON.parse(requestBody)).toEqual({ ignoreCache: true });
   expect(await screen.findByRole("button", { name: "运行中" })).toBeDisabled();
 });
 

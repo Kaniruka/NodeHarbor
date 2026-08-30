@@ -29,6 +29,9 @@ func (provider IPSuperProvider) ScoreWithBrowser(ctx context.Context, exitIdenti
 	if page.Status < 200 || page.Status >= 300 {
 		return 0, providerUnavailable(fmt.Sprintf("IPSuper provider unavailable: HTTP %d", page.Status))
 	}
+	if isIPSuperScorePending(body) {
+		return 0, providerUnavailable("IPSuper provider unavailable: rendered aggregate security score is still running")
+	}
 	if score, ok := parseIPSuperAggregateScore(body); ok {
 		return score, nil
 	}

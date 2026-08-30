@@ -107,6 +107,20 @@ func TestIPSuperBrowserScoringReadsAggregateScoreAfterThreatCounters(t *testing.
 	}
 }
 
+func TestIPSuperBrowserScoringRejectsPendingDefaultScore(t *testing.T) {
+	fixture := &browserRuntimeFixture{pages: []BrowserPage{
+		{Status: 200, Text: "203.0.113.8"},
+		{Status: 200, Text: "综合安全分 100/100\n2 tasks, 1 running, 0 errors"},
+	}}
+	provider := NewIPSuperProvider(nil)
+	provider.Endpoint = "https://ipsuper.test"
+
+	_, err := provider.ScoreWithBrowser(context.Background(), "203.0.113.8", "http://127.0.0.1:19090", fixture)
+	if err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("error = %v, want pending score failure", err)
+	}
+}
+
 func TestBrowserScoringRejectsChallengeResponse(t *testing.T) {
 	fixture := &browserRuntimeFixture{pages: []BrowserPage{
 		{Status: 200, Text: "203.0.113.8"},

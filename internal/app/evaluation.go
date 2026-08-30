@@ -167,6 +167,9 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 			return fmt.Errorf("initialize Evaluation Run storage: %w", err)
 		}
 	}
+	if err := application.migratePlaceholderScoreCache(ctx); err != nil {
+		return err
+	}
 	// #5 created evaluation_results before scoring fields existed. Keep existing
 	// installations readable without requiring a destructive database reset.
 	var columns = map[string]bool{}
@@ -262,6 +265,35 @@ func (application *Application) initializeEvaluationRuns(ctx context.Context) er
 		if _, err := application.database.ExecContext(ctx, `ALTER TABLE evaluation_runs ADD COLUMN reason TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// migratePlaceholderScoreCache invalidates scores written by the old browser
+// flow, which could cache IPSuper's default 100/100 card while its checks were
+// still running. The marker makes this cleanup a one-time migration so a real
+// score of 100 returned after the fix remains cacheable.
+func (application *Application) migratePlaceholderScoreCache(ctx context.Context) error {
+	transaction, err := application.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("start score cache migration: %w", err)
+	}
+	defer transaction.Rollback()
+	result, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO system_state(key, value) VALUES ('score_cache_placeholder_100_v1', 'completed')`)
+	if err != nil {
+		return fmt.Errorf("record score cache migration: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect score cache migration: %w", err)
+	}
+	if changed > 0 {
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM score_cache WHERE provider = 'ipsuper' AND score = 100`); err != nil {
+			return fmt.Errorf("clear placeholder score cache: %w", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit score cache migration: %w", err)
 	}
 	return nil
 }

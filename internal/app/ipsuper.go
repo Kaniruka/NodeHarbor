@@ -64,6 +64,9 @@ func (provider IPSuperProvider) score(ctx context.Context, exitIdentity string, 
 	if err != nil {
 		return 0, err
 	}
+	if isIPSuperScorePending(body) {
+		return 0, providerUnavailable("IPSuper provider unavailable: aggregate security score is still running")
+	}
 	if score, ok := parseIPSuperAggregateScore(body); ok {
 		return score, nil
 	}
@@ -112,6 +115,11 @@ func (provider IPSuperProvider) get(ctx context.Context, client *http.Client, ta
 // value. Keep that window bounded so unrelated numbers elsewhere on the page
 // cannot become the score.
 var ipSuperAggregateScore = regexp.MustCompile(`(?is)(?:综合\s*安全\s*分|aggregate\s*security\s*score)[\s\S]{0,160}?([0-9]{1,3}(?:\.[0-9]+)?)(?:\s|<[^>]*>)*\/\s*100\b`)
+var ipSuperRunningTasks = regexp.MustCompile(`(?i)\b[1-9]\d*\s+running\b|[1-9]\d*\s*运行中`)
+
+func isIPSuperScorePending(body []byte) bool {
+	return ipSuperRunningTasks.Match(body)
+}
 
 func parseIPSuperAggregateScore(body []byte) (float64, bool) {
 	if isProviderChallenge(body) {

@@ -155,8 +155,9 @@ func browserTextWaitExpression(markers []string) string {
 		quoted = append(quoted, fmt.Sprintf("%q", marker))
 	}
 	// IPSuper renders a default 100/100 card while its tasks are still
-	// running. Waiting for the score label alone would capture that placeholder.
-	return "() => { const text = document.body ? document.body.innerText : ''; return [" + strings.Join(quoted, ",") + "].some(marker => text.includes(marker)) && !/\\b[1-9]\\d*\\s+running\\b/i.test(text) && !/[1-9]\\d*\\s*运行中/.test(text); }"
+	// running. Require the task summary to explicitly report zero running
+	// tasks so the placeholder cannot become a cached score.
+	return "() => { const text = document.body ? document.body.innerText : ''; return [" + strings.Join(quoted, ",") + "].some(marker => text.includes(marker)) && /\\b0\\s+running\\b/i.test(text) && !/[1-9]\\d*\\s*运行中/.test(text); }"
 }
 
 func (runtime *PlaywrightBrowserRuntime) resetBrowser() {
