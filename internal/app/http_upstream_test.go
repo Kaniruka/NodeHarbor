@@ -159,3 +159,26 @@ func TestHTTPUpstreamConvertsTrojanURIWithPasswordOnlyUserinfo(t *testing.T) {
 		t.Fatalf("converted proxy = %#v", document.Proxies)
 	}
 }
+
+func TestHTTPUpstreamConvertsAnyTLSURIToYAML(t *testing.T) {
+	uriList := "anytls://secret-password@proxy.example/?sni=cdn.example&insecure=1#AnyTLS%20Node\n"
+	encodedList := base64.StdEncoding.EncodeToString([]byte(uriList))
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte(encodedList))
+	}))
+	defer server.Close()
+
+	decoded, _, err := NewHTTPUpstream(time.Second).FetchWithMetadata(context.Background(), UpstreamRequest{Location: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(decoded, &document); err != nil {
+		t.Fatalf("converted document is not valid YAML: %v", err)
+	}
+	if len(document.Proxies) != 1 || document.Proxies[0]["type"] != "anytls" || document.Proxies[0]["server"] != "proxy.example" || document.Proxies[0]["port"] != 443 || document.Proxies[0]["password"] != "secret-password" || document.Proxies[0]["sni"] != "cdn.example" || document.Proxies[0]["skip-cert-verify"] != true {
+		t.Fatalf("converted proxy = %#v", document.Proxies)
+	}
+}

@@ -63,6 +63,11 @@ func parseProxyURI(raw string) (map[string]any, bool) {
 			return nil, false
 		}
 		return parseHysteriaURI(parsed)
+	case "anytls":
+		if parsed.Host == "" {
+			return nil, false
+		}
+		return parseAnyTLSURI(parsed)
 	default:
 		return nil, false
 	}
@@ -244,6 +249,49 @@ func parseHysteriaURI(parsed *url.URL) (map[string]any, bool) {
 	}
 	if alpn := query.Get("alpn"); alpn != "" {
 		proxy["alpn"] = strings.Split(alpn, ",")
+	}
+	return proxy, true
+}
+
+func parseAnyTLSURI(parsed *url.URL) (map[string]any, bool) {
+	if parsed.Hostname() == "" {
+		return nil, false
+	}
+	port, ok := parsedPort(parsed)
+	if !ok {
+		if parsed.Port() != "" {
+			return nil, false
+		}
+		port = 443
+	}
+	query := parsed.Query()
+	proxy := map[string]any{"name": proxyURIName(parsed, "AnyTLS"), "type": "anytls", "server": parsed.Hostname(), "port": port}
+	if parsed.User != nil {
+		if password, ok := parsed.User.Password(); ok && password != "" {
+			proxy["password"] = password
+		} else if password := parsed.User.Username(); password != "" {
+			proxy["password"] = password
+		}
+	}
+	if _, hasPassword := proxy["password"]; !hasPassword {
+		if password := firstNonEmpty(query.Get("password"), query.Get("auth")); password != "" {
+			proxy["password"] = password
+		}
+	}
+	if sni := firstNonEmpty(query.Get("sni"), query.Get("peer")); sni != "" {
+		proxy["sni"] = sni
+	}
+	if insecure := strings.ToLower(query.Get("insecure")); insecure == "1" || insecure == "true" {
+		proxy["skip-cert-verify"] = true
+	}
+	if fingerprint := firstNonEmpty(query.Get("client-fingerprint"), query.Get("fp")); fingerprint != "" {
+		proxy["client-fingerprint"] = fingerprint
+	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		proxy["alpn"] = strings.Split(alpn, ",")
+	}
+	if udp := strings.ToLower(query.Get("udp")); udp == "1" || udp == "true" {
+		proxy["udp"] = true
 	}
 	return proxy, true
 }
