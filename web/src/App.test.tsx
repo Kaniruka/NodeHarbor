@@ -153,9 +153,43 @@ test("Nodes renders failed evaluation and scoring states without presenting a sp
     throw new Error(`unexpected request: ${url}`);
   });
   render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
-  expect(await screen.findByText("provider_unavailable: fixture provider outage")).toBeInTheDocument();
+  expect(await screen.findByText("错误")).toBeInTheDocument();
+  expect(screen.queryByText("provider_unavailable: fixture provider outage")).not.toBeInTheDocument();
   expect(screen.getByText("IP Score").parentElement?.parentElement).toHaveTextContent("—");
   expect(screen.queryByText("速度评分")).not.toBeInTheDocument();
+});
+
+test("Nodes labels active stages, keeps long failure reasons out of cards, and filters qualified nodes", async () => {
+  const run = {
+    ...currentRun,
+    total: 3,
+    passed: 1,
+    failed: 2,
+    results: [
+      { ...currentRun.results[0], nodeId: "node-running", name: "评分中的节点", state: "failed", ipScore: undefined, scoreSource: "", stages: { availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "running" } } },
+      { ...currentRun.results[0], nodeId: "node-testing", name: "测速中的节点", state: "failed", ipScore: undefined, scoreSource: "", stages: { availability: { status: "running" }, exitIdentity: { status: "pending" }, ipScore: { status: "pending" } } },
+      { ...currentRun.results[0], nodeId: "node-low", name: "低分节点", state: "failed", ipScore: 38, scoreSource: "provider", reason: "low_score: IP Score 38.00 is below threshold 70", stages: { availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "passed" } } },
+      { ...currentRun.results[0], nodeId: "node-qualified", name: "达标节点", state: "passed", ipScore: 82, scoreSource: "provider", stages: { availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "passed" } } },
+    ],
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([source]);
+    if (url.endsWith("/api/upstream-subscriptions/source-1/nodes")) return Response.json([]);
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json(run);
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
+  expect((await screen.findAllByText("评分中")).length).toBeGreaterThanOrEqual(1);
+  expect((await screen.findAllByText("测速中")).length).toBeGreaterThanOrEqual(1);
+  expect(screen.queryByText("low_score: IP Score 38.00 is below threshold 70")).not.toBeInTheDocument();
+  expect(screen.getByText("低于阈值")).toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText("仅显示达标节点"));
+  expect(screen.getByText("达标节点")).toBeInTheDocument();
+  expect(screen.queryByText("评分中的节点")).not.toBeInTheDocument();
+  expect(screen.queryByText("测速中的节点")).not.toBeInTheDocument();
+  expect(screen.queryByText("低分节点")).not.toBeInTheDocument();
 });
 
 test("Publish shows only the atomic publication snapshot using the same grouping", async () => {
@@ -189,7 +223,8 @@ test("Publish renders only nodes present in the current snapshot", async () => {
 test("Settings and Logs are separate destinations and History is not exposed", async () => {
   mockAPI(); render(<App />); await userEvent.click(await screen.findByRole("link", { name: "设置" }));
   expect(await screen.findByRole("heading", { name: "设置" })).toBeInTheDocument();
-  expect(screen.getByLabelText("IPSuper 合格阈值")).toHaveValue(70);
+  expect(screen.getByLabelText("合格阈值")).toHaveValue(70);
+  expect(screen.queryByLabelText("启用 IPSuper")).not.toBeInTheDocument();
   expect(screen.queryByText("评估历史")).not.toBeInTheDocument();
   await userEvent.click(await screen.findByRole("link", { name: "日志" }));
   expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
@@ -208,12 +243,12 @@ test("Settings saves scoring and runtime diagnostics without exposing an evaluat
   expect(await screen.findByText("浏览器运行时")).toBeInTheDocument();
   expect(screen.getByText("headless")).toBeInTheDocument();
   expect(screen.queryByText("评估间隔")).not.toBeInTheDocument();
-  const threshold = await screen.findByLabelText("IPSuper 合格阈值"); await userEvent.clear(threshold); await userEvent.type(threshold, "80");
+  const threshold = await screen.findByLabelText("合格阈值"); await userEvent.clear(threshold); await userEvent.type(threshold, "80");
   await userEvent.click(screen.getByRole("button", { name: "保存设置" }));
   expect(await screen.findByRole("button", { name: "已保存" })).toBeInTheDocument();
   expect(saved?.ipsuperThreshold).toBe(80);
   expect(saved?.scoringProvider).toBe("ipsuper");
-  expect(saved?.ipsuperEnabled).toBe(true);
+  expect(saved?.ipsuperEnabled).toBeUndefined();
 });
 
 test("Logs displays refresh, node, scoring, publication, Mihomo, and browser-runtime diagnostics", async () => {
