@@ -24,7 +24,7 @@ function mockAPI() {
 }
 
 test("renders six destinations and keeps evaluation out of Overview", async () => {
-  mockAPI(); render(<App />);
+  mockAPI(); const writeText = vi.fn().mockResolvedValue(undefined); Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } }); render(<App />);
   expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "订阅" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "节点" })).toBeInTheDocument();
@@ -33,6 +33,12 @@ test("renders six destinations and keeps evaluation out of Overview", async () =
   expect(screen.getByRole("link", { name: "日志" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "开始评估" })).not.toBeInTheDocument();
   expect(screen.getByText("达标节点")).toBeInTheDocument();
+  expect(screen.queryByText("家庭来源")).not.toBeInTheDocument();
+  expect(await screen.findByText("可用", { selector: "strong" })).toBeInTheDocument();
+  expect(screen.getByText("http://127.0.0.1:9876/sub/clash.yaml")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "复制稳定订阅链接" }));
+  expect(writeText).toHaveBeenCalledWith("http://127.0.0.1:9876/sub/clash.yaml");
+  expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
 });
 
 test("Subscriptions owns source management and shows unknown metadata without node results", async () => {
@@ -151,11 +157,31 @@ test("Nodes renders failed evaluation and scoring states without presenting a sp
 });
 
 test("Publish shows only the atomic publication snapshot using the same grouping", async () => {
-  mockAPI(); render(<App />); await userEvent.click(await screen.findByRole("link", { name: "发布" }));
+  mockAPI(); const writeText = vi.fn().mockResolvedValue(undefined); Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } }); render(<App />); await userEvent.click(await screen.findByRole("link", { name: "发布" }));
   expect(await screen.findByRole("heading", { name: "发布" })).toBeInTheDocument();
   expect(screen.getByText("家庭来源 · Tokyo")).toBeInTheDocument();
   expect(screen.getByText("已发布")).toBeInTheDocument();
+  expect(screen.getByText(/2026/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "复制稳定订阅链接" }));
+  expect(writeText).toHaveBeenCalledWith("http://127.0.0.1:9876/sub/clash.yaml");
+  const summary = screen.getByText("家庭来源").closest("summary");
+  if (!summary) throw new Error("publication summary not found");
+  await userEvent.click(summary);
+  expect(summary.parentElement).not.toHaveAttribute("open");
   expect(screen.queryByRole("button", { name: "开始评估" })).not.toBeInTheDocument();
+});
+
+test("Publish renders only nodes present in the current snapshot", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/publication")) return Response.json({ status: "retained", publishedAt: "2026-08-30T10:01:00Z", groups: [{ subscriptionId: "source-1", subscriptionName: "家庭来源", nodes: [{ nodeId: "published-1", name: "家庭来源 · Published", config: { type: "ss" }, medianLatencyMs: 95, ipScore: 82 }] }] });
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "发布" }));
+  expect(await screen.findByText("家庭来源 · Published")).toBeInTheDocument();
+  expect(screen.queryByText("家庭来源 · Candidate")).not.toBeInTheDocument();
+  expect(screen.getByText("保留上一版")).toBeInTheDocument();
 });
 
 test("Settings and Logs are separate destinations and History is not exposed", async () => {
