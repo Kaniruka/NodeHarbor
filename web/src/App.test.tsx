@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import App from "./App";
@@ -42,6 +42,60 @@ test("Subscriptions owns source management and shows unknown metadata without no
   expect(screen.getAllByText("未知").length).toBeGreaterThanOrEqual(2);
   expect(screen.queryByText("Tokyo")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "开始评估" })).not.toBeInTheDocument();
+});
+
+test("Subscriptions supports import, edit, refresh, enable/disable, and delete", async () => {
+  let subscriptions: Array<Record<string, any>> = [{ ...source, remainingTrafficBytes: undefined, trafficTotalBytes: undefined, expiresAt: undefined }];
+  const calls: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/upstream-subscriptions") && !init?.method) return Response.json(subscriptions);
+    if (url.endsWith("/api/upstream-subscriptions") && init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      const created = { ...source, id: "source-2", name: body.name, kind: body.kind, configuredDocument: body.document, proxyNodeCount: 1 };
+      subscriptions = [...subscriptions, created]; calls.push("create");
+      return Response.json(created, { status: 201 });
+    }
+    const match = url.match(/\/api\/upstream-subscriptions\/(source-[12])(?:\/([^/]+))?$/);
+    if (!match) throw new Error(`unexpected request: ${url}`);
+    const id = match[1]; const action = match[2];
+    if (init?.method === "PUT") {
+      const body = JSON.parse(String(init.body)); subscriptions = subscriptions.map((item) => item.id === id ? { ...item, name: body.name, configuredDocument: body.document } : item); calls.push("edit");
+      return Response.json(subscriptions.find((item) => item.id === id));
+    }
+    if (init?.method === "PATCH") {
+      const body = JSON.parse(String(init.body)); subscriptions = subscriptions.map((item) => item.id === id ? { ...item, enabled: body.enabled } : item); calls.push(body.enabled ? "enable" : "disable");
+      return Response.json(subscriptions.find((item) => item.id === id));
+    }
+    if (init?.method === "POST" && action === "refresh") {
+      subscriptions = subscriptions.map((item) => item.id === id ? { ...item, refreshStatus: "success", lastSuccessAt: "2026-08-30T11:00:00Z" } : item); calls.push("refresh");
+      return Response.json(subscriptions.find((item) => item.id === id));
+    }
+    if (init?.method === "DELETE") { subscriptions = subscriptions.filter((item) => item.id !== id); calls.push("delete"); return new Response(null, { status: 204 }); }
+    throw new Error(`unexpected mutation: ${url}`);
+  });
+
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "订阅" }));
+  expect(screen.getByRole("button", { name: "订阅 URL" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "上传文件" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "粘贴 YAML" }));
+  await userEvent.type(screen.getByLabelText("名称"), "新增来源");
+  await userEvent.type(screen.getByLabelText("YAML 内容"), "proxies:\n  - name: pasted\n    type: ss");
+  await userEvent.click(screen.getByRole("button", { name: "添加订阅" }));
+  expect(await screen.findByRole("heading", { name: "新增来源" })).toBeInTheDocument();
+  const card = () => screen.getByRole("heading", { name: "新增来源" }).closest("article") as HTMLElement;
+  await userEvent.click(within(card()).getByRole("button", { name: "编辑" }));
+  const nameInput = screen.getByLabelText("名称"); await userEvent.clear(nameInput); await userEvent.type(nameInput, "已编辑来源");
+  await userEvent.click(screen.getByRole("button", { name: "保存更改" }));
+  const editedCard = () => screen.getByRole("heading", { name: "已编辑来源" }).closest("article") as HTMLElement;
+  await userEvent.click(within(editedCard()).getByRole("button", { name: "手动更新" }));
+  await userEvent.click(within(editedCard()).getByRole("button", { name: "禁用" }));
+  expect(await within(editedCard()).findByRole("button", { name: "启用" })).toBeInTheDocument();
+  await userEvent.click(within(editedCard()).getByRole("button", { name: "启用" }));
+  await userEvent.click(within(editedCard()).getByRole("button", { name: "删除" }));
+  expect(screen.queryByRole("heading", { name: "已编辑来源" })).not.toBeInTheDocument();
+  expect(calls).toEqual(["create", "edit", "refresh", "disable", "enable", "delete"]);
 });
 
 test("Nodes has one global evaluation control and compact grouped cards", async () => {
