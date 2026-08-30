@@ -58,6 +58,11 @@ func parseProxyURI(raw string) (map[string]any, bool) {
 			return nil, false
 		}
 		return parseTrojanURI(parsed)
+	case "hysteria", "hysteria2", "hy2":
+		if parsed.Host == "" {
+			return nil, false
+		}
+		return parseHysteriaURI(parsed)
 	default:
 		return nil, false
 	}
@@ -183,6 +188,57 @@ func parseTrojanURI(parsed *url.URL) (map[string]any, bool) {
 	query := parsed.Query()
 	proxy := map[string]any{"name": proxyURIName(parsed, "Trojan"), "type": "trojan", "server": parsed.Hostname(), "port": port, "password": password, "tls": true}
 	addTransportOptions(proxy, query.Get("type"), query.Get("path"), query.Get("host"), firstNonEmpty(query.Get("sni"), query.Get("peer")))
+	return proxy, true
+}
+
+func parseHysteriaURI(parsed *url.URL) (map[string]any, bool) {
+	port, ok := parsedPort(parsed)
+	if !ok {
+		return nil, false
+	}
+	query := parsed.Query()
+	protocol := strings.ToLower(parsed.Scheme)
+	proxy := map[string]any{"name": proxyURIName(parsed, "Hysteria"), "type": protocol, "server": parsed.Hostname(), "port": port}
+	if protocol == "hy2" {
+		proxy["type"] = "hysteria2"
+	}
+	if parsed.User != nil {
+		if password, ok := parsed.User.Password(); ok && password != "" {
+			proxy["password"] = password
+		} else if password := parsed.User.Username(); password != "" {
+			proxy["password"] = password
+		}
+	}
+	if protocol == "hysteria" {
+		if auth := firstNonEmpty(query.Get("auth"), query.Get("auth-str")); auth != "" {
+			proxy["auth-str"] = auth
+		}
+		if transport := query.Get("protocol"); transport != "" {
+			proxy["protocol"] = transport
+		}
+	} else {
+		if obfs := query.Get("obfs"); obfs != "" {
+			proxy["obfs"] = obfs
+		}
+		if obfsPassword := query.Get("obfs-password"); obfsPassword != "" {
+			proxy["obfs-password"] = obfsPassword
+		}
+	}
+	if sni := firstNonEmpty(query.Get("sni"), query.Get("peer")); sni != "" {
+		proxy["sni"] = sni
+	}
+	if insecure := strings.ToLower(query.Get("insecure")); insecure == "1" || insecure == "true" {
+		proxy["skip-cert-verify"] = true
+	}
+	if up := firstNonEmpty(query.Get("upmbps"), query.Get("up")); up != "" {
+		proxy["up"] = up
+	}
+	if down := firstNonEmpty(query.Get("downmbps"), query.Get("down")); down != "" {
+		proxy["down"] = down
+	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		proxy["alpn"] = strings.Split(alpn, ",")
+	}
 	return proxy, true
 }
 

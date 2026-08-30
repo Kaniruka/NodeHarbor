@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestHTTPUpstreamPreservesProviderReportedQuotaAndExpiry(t *testing.T) {
@@ -86,6 +88,51 @@ func TestHTTPUpstreamConvertsBase64ProxyURIListToYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(decoded), "name: Encoded Node") || !strings.Contains(string(decoded), "type: ss") || !strings.Contains(string(decoded), "server: proxy.example") {
+		t.Fatalf("converted document = %q", decoded)
+	}
+}
+
+func TestHTTPUpstreamConvertsBase64Hysteria2URIToYAML(t *testing.T) {
+	uriList := "hysteria2://secret-password@proxy.example:443/?sni=cdn.example&insecure=1#Fast%20Node\n"
+	encodedList := base64.StdEncoding.EncodeToString([]byte(uriList))
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte(encodedList))
+	}))
+	defer server.Close()
+
+	upstream := NewHTTPUpstream(time.Second)
+	decoded, _, err := upstream.FetchWithMetadata(context.Background(), UpstreamRequest{Location: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(decoded), "name: Fast Node") || !strings.Contains(string(decoded), "type: hysteria2") || !strings.Contains(string(decoded), "password: secret-password") || !strings.Contains(string(decoded), "skip-cert-verify: true") {
+		t.Fatalf("converted document = %q", decoded)
+	}
+	var document struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(decoded, &document); err != nil {
+		t.Fatalf("converted document is not valid YAML: %v", err)
+	}
+	if len(document.Proxies) != 1 {
+		t.Fatalf("converted proxy count = %d, want 1", len(document.Proxies))
+	}
+}
+
+func TestHTTPUpstreamConvertsBase64HysteriaURIToYAML(t *testing.T) {
+	uriList := "hysteria://proxy.example:443?auth=legacy-secret&peer=cdn.example&insecure=1&upmbps=10&downmbps=50#Legacy%20Node\n"
+	encodedList := base64.StdEncoding.EncodeToString([]byte(uriList))
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte(encodedList))
+	}))
+	defer server.Close()
+
+	upstream := NewHTTPUpstream(time.Second)
+	decoded, _, err := upstream.FetchWithMetadata(context.Background(), UpstreamRequest{Location: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(decoded), "name: Legacy Node") || !strings.Contains(string(decoded), "type: hysteria") || !strings.Contains(string(decoded), "auth-str: legacy-secret") || !strings.Contains(string(decoded), "skip-cert-verify: true") {
 		t.Fatalf("converted document = %q", decoded)
 	}
 }
