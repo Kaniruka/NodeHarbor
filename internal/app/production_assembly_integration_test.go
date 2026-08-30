@@ -49,8 +49,8 @@ func TestProductionAssemblyPublishesThroughRealMihomo(t *testing.T) {
 			_, _ = response.Write([]byte("203.0.113.16\n"))
 		case "/score":
 			scoreCalls.Add(1)
-			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"status":"success","data":{"ip_score":99}}`))
+			response.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = response.Write([]byte(`<html><body><div>综合安全分 99/100</div></body></html>`))
 		default:
 			http.NotFound(response, request)
 		}
@@ -60,7 +60,7 @@ func TestProductionAssemblyPublishesThroughRealMihomo(t *testing.T) {
 	dependencies := app.DefaultDependenciesWithTestEndpoints(
 		app.NewMihomoKernelWithBuild(mihomoPath, app.WindowsMihomoBuild),
 		app.TestEndpointConfig{
-			IPLarkEndpoint:       externalServices.URL + "/score",
+			IPSuperEndpoint:      externalServices.URL + "/score",
 			IPv4IdentityEndpoint: externalServices.URL + "/identity",
 			IPv6IdentityEndpoint: externalServices.URL + "/identity-v6",
 		},

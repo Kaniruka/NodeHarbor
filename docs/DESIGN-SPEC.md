@@ -82,21 +82,21 @@ Timeout, success requirement, latency threshold, and test URLs are configurable.
 
 ## 7. Exit identity and IP scoring
 
-The default scoring provider is IPLark. IPSuper is an alternative provider. Each provider has its own enabled state, threshold, adapter, cache, and failure status. Scores from different providers are never combined or treated as equivalent.
+IPSuper is the sole scoring provider. It has its own enabled state, threshold, browser adapter, cache, and failure status; its aggregate security score is never combined with another provider score.
 
-Both providers start with a threshold of 70, configurable from 0 through 100. A proxy node qualifies only when it passes the availability check and its selected provider score meets that provider's threshold.
+IPSuper starts with a threshold of 70, configurable from 0 through 100. A proxy node qualifies only when it passes the availability check and its IPSuper score meets that threshold.
 
 The first release prefers an IPv4 exit identity and falls back to IPv6 when IPv4 is unavailable. The UI records the address family that was scored.
 
-Score-cache keys are `(scoring provider, exit IP address)`. The default time-to-live is 24 hours. Switching providers, cache expiry, or an explicit ignore-cache run requires a new request.
+Score-cache keys are `(scoring provider, exit IP address)`. The default time-to-live is 24 hours. Cache expiry or an explicit ignore-cache run requires a new request.
 
 If a new exit identity cannot be scored, its nodes are excluded. If a previous successful score exists, it may be reused for at most 24 hours. Multiple nodes sharing one exit identity reuse the same score, but all qualified nodes remain in the published subscription by default.
 
 ### 7.1 Website-adapter constraint
 
-IPLark's current rendered flow starts at `/search`, submits the target IP, and then routes to an address page such as `/<address>`; legacy `/ipscore` requests may redirect or return HTTP 404. Direct non-browser requests can receive HTTP 403, and a Secbit challenge page may keep reloading without a score. IPSuper is queried through its public page in a bounded Test Channel session; neither source is treated as a documented, stable bulk-scoring API.
+IPSuper is queried through its public page in a bounded Test Channel browser session; it is not treated as a documented, stable bulk-scoring API. The adapter extracts only the rendered aggregate security score and treats challenge pages, HTTP failures, missing scores, and page-shape changes as unavailable.
 
-NodeHarbor therefore uses replaceable, best-effort provider adapters backed by the Managed Browser Runtime. Each Browser Scoring Session creates a fresh Browser Context for one Proxy Node and Scoring Provider, verifies the Exit Identity through the same Browser Proxy Endpoint, renders the provider page, and extracts a provider-specific score from the DOM. The default navigation/rendering deadline is 15 seconds. Transport or browser-process failure may be retried once; HTTP 403, CAPTCHA, challenge, rate limit, or missing score is not retried. Adapter failures and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
+NodeHarbor therefore uses a replaceable, best-effort IPSuper adapter backed by the Managed Browser Runtime. Each Browser Scoring Session creates a fresh Browser Context for one Proxy Node, verifies the Exit Identity through the same Browser Proxy Endpoint, renders the IPSuper page, and extracts the visible aggregate security score from the DOM. The default navigation/rendering deadline is 15 seconds. Transport or browser-process failure may be retried once; HTTP 403, CAPTCHA, challenge, rate limit, or missing score is not retried. Adapter failures and website updates are reported as `score unavailable`; they must not corrupt or empty the previous publication snapshot.
 
 The browser runs headless by default and can be switched to headed diagnostic mode. Its debug interface binds only to loopback on a random port. Browser Context state is ephemeral: cookies, LocalStorage, cache, and credentials are not reused between sessions.
 
@@ -181,7 +181,7 @@ Failure evidence is limited to the latest 20 provider failures and expires after
 - The package contains the pinned Managed Browser Runtime or reports an actionable runtime-unavailable error.
 - The system accepts up to 10 Clash/Mihomo YAML inputs and safely evaluates approximately 500 nodes.
 - Availability checks precede scoring and enforce the configured success, timeout, and latency rules.
-- Browser-backed IPSuper and IPLark adapters can obtain and cache provider-specific scores when the website permits it, and degrade safely when it does not.
+- The browser-backed IPSuper adapter can obtain and cache aggregate security scores when the website permits it, and degrades safely when it does not.
 - Browser scoring uses an isolated Context and the verified Browser Proxy Endpoint, with deterministic local fixture coverage and an explicit non-CI live smoke test.
 - The output contains only qualified nodes and the three generated groups, and the bundled Mihomo accepts it.
 - LAN clients can fetch the published subscription but cannot reach management APIs.

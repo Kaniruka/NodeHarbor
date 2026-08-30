@@ -173,13 +173,12 @@ test("failed refresh shows a stale Upstream Subscription and its reason", async 
   expect(screen.getByText("fetch Upstream Subscription: connection timed out")).toBeInTheDocument();
 });
 
-test("scoring settings keep both provider thresholds and expose provider diagnostics", async () => {
+test("scoring settings keep the IPSuper threshold and expose provider diagnostics", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/api/settings") && init?.method === "PUT") {
       expect(JSON.parse(String(init.body))).toMatchObject({
         scoringProvider: "ipsuper",
-        iplarkThreshold: 61,
         ipsuperThreshold: 73,
       });
       return new Response(null, { status: 204 });
@@ -189,10 +188,8 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
         language: "zh-CN",
         installationId: "installation-1",
         scoringProvider: "ipsuper",
-        iplarkThreshold: 61,
         ipsuperThreshold: 73,
         scoringProviders: [
-          { name: "iplark", enabled: true },
           { name: "ipsuper", enabled: true, failureStatus: "IPSuper aggregate security score was not found" },
         ],
       });
@@ -206,11 +203,11 @@ test("scoring settings keep both provider thresholds and expose provider diagnos
   });
 
   render(<App />);
-  expect(await screen.findByLabelText("IPLark 合格阈值")).toHaveValue(61);
-  expect(screen.getByLabelText("IPSuper 合格阈值")).toHaveValue(73);
+  const thresholdInput = await screen.findByLabelText(/IPSuper (pass threshold|合格阈值)/);
+  expect(thresholdInput).toHaveValue(73);
   expect(screen.getByText(/IPSuper aggregate security score was not found/)).toBeInTheDocument();
-  await userEvent.clear(screen.getByLabelText("IPSuper 合格阈值"));
-  await userEvent.type(screen.getByLabelText("IPSuper 合格阈值"), "73");
+  await userEvent.clear(thresholdInput);
+  await userEvent.type(thresholdInput, "73");
   await userEvent.click(screen.getByRole("button", { name: "保存评分设置" }));
 });
 
@@ -218,15 +215,15 @@ test("evaluation results show independent stage diagnostics and provider availab
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json({
-      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70,
-      scoringProviders: [{ name: "iplark", enabled: true, status: "unavailable", failureStatus: "IPLark provider unavailable: HTTP 403" }],
+      language: "en", installationId: "installation-1", scoringProvider: "ipsuper", ipsuperThreshold: 70,
+      scoringProviders: [{ name: "ipsuper", enabled: true, status: "unavailable", failureStatus: "IPSuper provider unavailable: HTTP 403" }],
     });
     if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
     if (url.endsWith("/api/evaluation-runs/current")) return Response.json({
       status: "completed", total: 1, passed: 0, failed: 1, publicationResult: "retained",
-      reason: "all scoring attempts failed; previous Publication Snapshot retained: IPLark provider unavailable: HTTP 403",
-      results: [{ name: "Mitce · node-1", state: "failed", attempts: 3, successful: 3, medianLatencyMs: 120, exitIdentity: "203.0.113.8", addressFamily: "ipv4", reason: "provider_unavailable: IPLark provider unavailable: HTTP 403", stages: {
-        availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "unavailable", reason: "IPLark provider unavailable: HTTP 403" },
+      reason: "all scoring attempts failed; previous Publication Snapshot retained: IPSuper provider unavailable: HTTP 403",
+      results: [{ name: "Mitce · node-1", state: "failed", attempts: 3, successful: 3, medianLatencyMs: 120, exitIdentity: "203.0.113.8", addressFamily: "ipv4", reason: "provider_unavailable: IPSuper provider unavailable: HTTP 403", stages: {
+        availability: { status: "passed" }, exitIdentity: { status: "passed" }, ipScore: { status: "unavailable", reason: "IPSuper provider unavailable: HTTP 403" },
       } }],
     });
     if (url.endsWith("/api/evaluation-runs")) return Response.json([]);
@@ -239,7 +236,7 @@ test("evaluation results show independent stage diagnostics and provider availab
   expect(await screen.findByText("Availability Check")).toBeInTheDocument();
   expect(screen.getByText("Exit Identity")).toBeInTheDocument();
   expect(screen.getByText("IP Score")).toBeInTheDocument();
-  expect(screen.getByText("IPLark provider unavailable: HTTP 403")).toBeInTheDocument();
+  expect(screen.getByText("IPSuper provider unavailable: HTTP 403")).toBeInTheDocument();
   expect(screen.getByText("Scoring provider failed; previous Published Subscription retained")).toBeInTheDocument();
   expect(screen.getByText(/previous Publication Snapshot retained/)).toBeInTheDocument();
   expect(screen.getAllByText(/Unavailable/).length).toBeGreaterThan(0);
@@ -252,7 +249,7 @@ test("evaluation polling refreshes provider availability status", async () => {
     if (url.endsWith("/api/settings")) {
       settingsCalls += 1;
       const unavailable = settingsCalls > 2;
-      return Response.json({ language: "en", installationId: "installation-1", scoringProvider: "iplark", scoringProviders: [{ name: "iplark", enabled: true, status: unavailable ? "unavailable" : "unverified", failureStatus: unavailable ? "fixture provider outage" : "" }] });
+      return Response.json({ language: "en", installationId: "installation-1", scoringProvider: "ipsuper", scoringProviders: [{ name: "ipsuper", enabled: true, status: unavailable ? "unavailable" : "unverified", failureStatus: unavailable ? "fixture provider outage" : "" }] });
     }
     if (url.endsWith("/api/health")) return Response.json({ status: "healthy", backend: { status: "healthy" }, database: { status: "healthy" }, publishedSubscription: { status: "healthy" } });
     if (url.endsWith("/api/evaluation-runs/current")) return Response.json({ status: "idle", total: 0, passed: 0, failed: 0, results: [] });
@@ -263,15 +260,15 @@ test("evaluation polling refreshes provider availability status", async () => {
   });
 
   render(<App />);
-  expect(await screen.findByText(/IPLark: Unverified/)).toBeInTheDocument();
-  expect(await screen.findByText(/IPLark: Unavailable/, {}, { timeout: 2500 })).toBeInTheDocument();
+  expect(await screen.findByText(/IPSuper: Unverified/)).toBeInTheDocument();
+  expect(await screen.findByText(/IPSuper: Unavailable/, {}, { timeout: 2500 })).toBeInTheDocument();
 });
 
 test("History shows durable run diagnostics and links to configuration export", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/api/settings")) return Response.json({
-      language: "en", installationId: "installation-1", scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70,
+      language: "en", installationId: "installation-1", scoringProvider: "ipsuper", ipsuperThreshold: 70,
       evaluationIntervalMinutes: 360, historyRetentionDays: 7, scoreCacheTTLMinutes: 1440, listenPort: 9876,
       availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5, availabilityMaxLatencyMs: 1500,
       availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
@@ -307,7 +304,7 @@ test("listener diagnostics show local and current Published Subscription entrypo
       localSubscriptionURL: "http://127.0.0.1:19876/sub/clash.yaml", subscriptionURL: "http://lan.example:19876/sub/clash.yaml",
       lanSubscriptionURLs: ["http://192.168.1.20:19876/sub/clash.yaml"],
       listenerError: "listen for Published Subscription: address already in use",
-      scoringProvider: "iplark", iplarkThreshold: 70, ipsuperThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
+      scoringProvider: "ipsuper", ipsuperThreshold: 70, evaluationIntervalMinutes: 360, historyRetentionDays: 7,
       scoreCacheTTLMinutes: 1440, availabilityAttempts: 3, availabilityRequiredSuccesses: 2, availabilityTimeoutSeconds: 5,
       availabilityMaxLatencyMs: 1500, availabilityURLs: [], evaluationWorkerCount: 3, scoringJitterMs: 100, scoringProviders: [],
     });

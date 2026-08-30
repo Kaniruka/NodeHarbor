@@ -50,16 +50,16 @@ func TestDefaultDependenciesUseConfiguredSmokeEndpoints(t *testing.T) {
 	dependencies := app.DefaultDependenciesWithTestEndpoints(
 		app.NewMihomoKernelWithBuild("nodeharbor-core", app.WindowsMihomoBuild),
 		app.TestEndpointConfig{
-			IPLarkEndpoint:       "http://127.0.0.1:19001/score",
+			IPSuperEndpoint:      "http://127.0.0.1:19001/score",
 			IPv4IdentityEndpoint: "http://127.0.0.1:19001/identity",
 			IPv6IdentityEndpoint: "http://127.0.0.1:19001/identity-v6",
 		},
 	)
-	provider, ok := dependencies.ScoringProviders["iplark"].(app.IPLarkProvider)
+	provider, ok := dependencies.ScoringProviders["ipsuper"].(app.IPSuperProvider)
 	if !ok {
-		t.Fatalf("IPLark provider=%T, want app.IPLarkProvider", dependencies.ScoringProviders["iplark"])
+		t.Fatalf("IPSuper provider=%T, want app.IPSuperProvider", dependencies.ScoringProviders["ipsuper"])
 	}
 	if provider.Endpoint != "http://127.0.0.1:19001/score" {
-		t.Fatalf("IPLark endpoint=%q", provider.Endpoint)
+		t.Fatalf("IPSuper endpoint=%q", provider.Endpoint)
 	}
 }

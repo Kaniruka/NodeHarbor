@@ -16,7 +16,6 @@ import (
 )
 
 func DefaultDependencies(kernel Kernel) Dependencies {
-	iplark := NewIPLarkProvider(nil)
 	ipsuper := NewIPSuperProvider(nil)
 	testChannel := TestChannel(UnavailableTestChannel{})
 	if mihomo, ok := kernel.(MihomoKernel); ok {
@@ -24,8 +23,8 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 	}
 	return Dependencies{
 		Upstream:         NewHTTPUpstream(30 * time.Second),
-		Scoring:          iplark,
-		ScoringProviders: map[string]ScoringProvider{"iplark": iplark, "ipsuper": ipsuper},
+		Scoring:          ipsuper,
+		ScoringProviders: map[string]ScoringProvider{"ipsuper": ipsuper},
 		Kernel:           kernel,
 		TestChannel:      testChannel,
 	}
@@ -35,7 +34,6 @@ func DefaultDependencies(kernel Kernel) Dependencies {
 // package smoke tests. Normal application assembly always uses the real
 // provider and Exit Identity endpoints.
 type TestEndpointConfig struct {
-	IPLarkEndpoint       string
 	IPSuperEndpoint      string
 	IPv4IdentityEndpoint string
 	IPv6IdentityEndpoint string
@@ -43,27 +41,10 @@ type TestEndpointConfig struct {
 
 func DefaultDependenciesWithTestEndpoints(kernel Kernel, config TestEndpointConfig) Dependencies {
 	dependencies := DefaultDependencies(kernel)
-	if config.IPLarkEndpoint != "" {
-		if provider, ok := dependencies.ScoringProviders["iplark"].(IPLarkProvider); ok {
-			provider.Endpoint = config.IPLarkEndpoint
-			dependencies.ScoringProviders["iplark"] = provider
-			if _, ok := dependencies.Scoring.(IPLarkProvider); ok {
-				dependencies.Scoring = provider
-			}
-		}
-	}
 	if config.IPSuperEndpoint != "" {
 		if provider, ok := dependencies.ScoringProviders["ipsuper"].(IPSuperProvider); ok {
 			provider.Endpoint = config.IPSuperEndpoint
 			dependencies.ScoringProviders["ipsuper"] = provider
-		}
-	}
-	if provider, ok := dependencies.ScoringProviders["iplark"].(IPLarkProvider); ok {
-		provider.IPv4IdentityEndpoint = endpointOrDefault(config.IPv4IdentityEndpoint, ipv4IdentityEndpoint)
-		provider.IPv6IdentityEndpoint = endpointOrDefault(config.IPv6IdentityEndpoint, ipv6IdentityEndpoint)
-		dependencies.ScoringProviders["iplark"] = provider
-		if _, ok := dependencies.Scoring.(IPLarkProvider); ok {
-			dependencies.Scoring = provider
 		}
 	}
 	if provider, ok := dependencies.ScoringProviders["ipsuper"].(IPSuperProvider); ok {

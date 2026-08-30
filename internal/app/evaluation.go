@@ -267,8 +267,8 @@ func (application *Application) handleScoringProviderDiagnostic(w http.ResponseW
 		return
 	}
 	exitIdentity := strings.TrimSpace(input.ExitIdentity)
-	results := make([]scoringProviderDiagnosticResult, 0, 2)
-	for _, name := range []string{"iplark", "ipsuper"} {
+	results := make([]scoringProviderDiagnosticResult, 0, 1)
+	for _, name := range []string{"ipsuper"} {
 		provider, configured := application.scoringProviderByName(name)
 		enabled, enabledErr := application.scoringProviderEnabled(r.Context(), name)
 		if !configured || enabledErr != nil || !enabled {
@@ -1194,7 +1194,7 @@ func (application *Application) scoringProviderByName(name string) (ScoringProvi
 	if provider, ok := application.dependencies.ScoringProviders[name]; ok && provider != nil {
 		return provider, true
 	}
-	if name == "iplark" && application.dependencies.Scoring != nil {
+	if name == "ipsuper" && application.dependencies.Scoring != nil {
 		return application.dependencies.Scoring, true
 	}
 	return nil, false
@@ -1210,9 +1210,6 @@ func (application *Application) scoringProviderEnabled(ctx context.Context, name
 
 func (application *Application) scoringThreshold(ctx context.Context, provider string) int {
 	key := "ipsuper_threshold"
-	if provider == "iplark" {
-		key = "iplark_threshold"
-	}
 	var value int
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil || value < 0 || value > 100 {
 		return 70

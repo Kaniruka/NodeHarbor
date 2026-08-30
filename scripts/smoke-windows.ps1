@@ -172,8 +172,8 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $modeFile, $subscripti
                             $body = 'provider unavailable'
                         }
                         else {
-                            $body = '{"status":"success","data":{"ip_score":99}}'
-                            $contentType = 'application/json; charset=utf-8'
+                            $body = '<html><body><main>综合安全分 99/100</main></body></html>'
+                            $contentType = 'text/html; charset=utf-8'
                         }
                     }
                     default {
@@ -215,7 +215,7 @@ try {
     [Environment]::SetEnvironmentVariable('NODEHARBOR_PACKAGE_SMOKE', '1', 'Process')
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     $testArguments = @(
-        '--test-iplark-endpoint', "http://127.0.0.1:$fakePort/score",
+        '--test-ipsuper-endpoint', "http://127.0.0.1:$fakePort/score",
         '--test-ipv4-identity-endpoint', "http://127.0.0.1:$fakePort/identity",
         '--test-ipv6-identity-endpoint', "http://127.0.0.1:$fakePort/identity-v6"
     )
@@ -246,8 +246,8 @@ try {
     }
 
     $settings = @{
-        scoringProvider = 'iplark'
-        iplarkThreshold = 70
+        scoringProvider = 'ipsuper'
+        ipsuperThreshold = 70
         availabilityAttempts = 1
         availabilityRequiredSuccesses = 1
         availabilityTimeoutSeconds = 5

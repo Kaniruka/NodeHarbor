@@ -38,7 +38,6 @@ func run() error {
 	browserPath := flag.String("browser-path", "", "advanced: override the bundled Chromium executable")
 	browserDriver := flag.String("browser-driver", "", "advanced: override the bundled Playwright driver directory")
 	browserHeaded := flag.Bool("browser-headed", false, "advanced: show scoring pages while diagnosing provider failures")
-	testIPLarkEndpoint := flag.String("test-iplark-endpoint", "", "explicit deterministic smoke-test IPLark endpoint")
 	testIPSuperEndpoint := flag.String("test-ipsuper-endpoint", "", "explicit deterministic smoke-test IPSuper endpoint")
 	testIPv4IdentityEndpoint := flag.String("test-ipv4-identity-endpoint", "", "explicit deterministic smoke-test IPv4 Exit Identity endpoint")
 	testIPv6IdentityEndpoint := flag.String("test-ipv6-identity-endpoint", "", "explicit deterministic smoke-test IPv6 Exit Identity endpoint")
@@ -68,13 +67,12 @@ func run() error {
 	if resolvedBrowserDriver == "" {
 		resolvedBrowserDriver = filepath.Join(runtimeRoot, "driver")
 	}
-	testEndpointsRequested := *testIPLarkEndpoint != "" || *testIPSuperEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
+	testEndpointsRequested := *testIPSuperEndpoint != "" || *testIPv4IdentityEndpoint != "" || *testIPv6IdentityEndpoint != ""
 	if testEndpointsRequested && os.Getenv("NODEHARBOR_PACKAGE_SMOKE") != "1" {
 		return errors.New("deterministic smoke endpoints require NODEHARBOR_PACKAGE_SMOKE=1")
 	}
 	if testEndpointsRequested {
 		dependencies = app.DefaultDependenciesWithTestEndpoints(kernel, app.TestEndpointConfig{
-			IPLarkEndpoint:       *testIPLarkEndpoint,
 			IPSuperEndpoint:      *testIPSuperEndpoint,
 			IPv4IdentityEndpoint: *testIPv4IdentityEndpoint,
 			IPv6IdentityEndpoint: *testIPv6IdentityEndpoint,

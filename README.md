@@ -14,7 +14,7 @@ Requirements: Go 1.24 or newer and Node.js 24 or newer.
 .\scripts\dev.ps1
 ```
 
-The script downloads the pinned Mihomo v1.19.30 Windows build on first run, verifies both archive and executable SHA-256 digests on every startup, builds NodeHarbor beside its owned core, and opens <http://127.0.0.1:9876> in the default browser. The Windows package also contains the pinned Chromium browser runtime used by IPSuper and IPLark scoring. The initial subscription is available at <http://127.0.0.1:9876/sub/clash.yaml>, including when there are no Proxy Nodes. Runtime state is stored under `data/` by default.
+The script downloads the pinned Mihomo v1.19.30 Windows build on first run, verifies both archive and executable SHA-256 digests on every startup, builds NodeHarbor beside its owned core, and opens <http://127.0.0.1:9876> in the default browser. The Windows package also contains the pinned Chromium browser runtime used by IPSuper scoring. The initial subscription is available at <http://127.0.0.1:9876/sub/clash.yaml>, including when there are no Proxy Nodes. Runtime state is stored under `data/` by default.
 
 The default listener is `127.0.0.1:9876`. To make only the Published Subscription and health reachable from a trusted LAN, bind the listener to a reachable address such as `0.0.0.0`; management routes still reject non-loopback clients:
 
@@ -38,7 +38,7 @@ Expand-Archive .\dist\NodeHarbor-windows-0.3.0.zip -DestinationPath .\dist\nodeh
 .\scripts\smoke-windows.ps1 -PackageDirectory .\dist\nodeharbor-package
 ```
 
-The package contains `browser-runtime\driver`, `browser-runtime\browsers`, the pinned Mihomo core, and the NodeHarbor executable. If the browser runtime is missing or cannot start, scoring fails closed with `runtime_unavailable` and the previous Publication Snapshot is retained. `--browser-headed=true` and `--browser-path` are diagnostic overrides; normal scoring is headless and uses an ephemeral browser context per Proxy Node and provider.
+The package contains `browser-runtime\driver`, `browser-runtime\browsers`, the pinned Mihomo core, and the NodeHarbor executable. If the browser runtime is missing or cannot start, scoring fails closed with `runtime_unavailable` and the previous Publication Snapshot is retained. `--browser-headed=true` and `--browser-path` are diagnostic overrides; normal IPSuper scoring is headless and uses an ephemeral browser context per Proxy Node.
 
 ## Verify
 

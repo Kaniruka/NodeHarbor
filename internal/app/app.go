@@ -152,12 +152,6 @@ type BrowserRuntime interface {
 	Close() error
 }
 
-// BrowserRuntimeSearch executes a provider's rendered search flow in the same
-// Browser Context as the Exit Identity check.
-type BrowserRuntimeSearch interface {
-	FetchWithInput(context.Context, string, string, string, string) ([]BrowserPage, error)
-}
-
 type BrowserRuntimeTextWait interface {
 	FetchUntilText(context.Context, string, []string, []string) ([]BrowserPage, error)
 }
@@ -241,7 +235,6 @@ type settingsResponse struct {
 	Language                      string                  `json:"language"`
 	InstallationID                string                  `json:"installationId"`
 	ScoringProvider               string                  `json:"scoringProvider"`
-	IPLarkThreshold               int                     `json:"iplarkThreshold"`
 	IPSuperThreshold              int                     `json:"ipsuperThreshold"`
 	EvaluationIntervalMinutes     int                     `json:"evaluationIntervalMinutes"`
 	HistoryRetentionDays          int                     `json:"historyRetentionDays"`
@@ -377,16 +370,11 @@ func (application *Application) initialize(ctx context.Context) error {
 		return fmt.Errorf("initialize language: %w", err)
 	}
 	for key, value := range map[string]string{
-		"scoring_provider":                "iplark",
-		"iplark_threshold":                "70",
+		"scoring_provider":                "ipsuper",
 		"ipsuper_threshold":               "70",
-		"iplark_enabled":                  "1",
 		"ipsuper_enabled":                 "1",
-		"iplark_failure":                  "",
 		"ipsuper_failure":                 "",
-		"iplark_status":                   "unverified",
 		"ipsuper_status":                  "unverified",
-		"iplark_checked_at":               "",
 		"ipsuper_checked_at":              "",
 		"evaluation_interval_minutes":     "360",
 		"history_retention_days":          "7",
@@ -405,7 +393,7 @@ func (application *Application) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize scoring setting: %w", err)
 		}
 	}
-	if err := application.migrateIPCheckSettings(ctx); err != nil {
+	if err := application.migrateRetiredScoringProviderSettings(ctx); err != nil {
 		return err
 	}
 	installationID, err := randomID()
@@ -425,20 +413,30 @@ func (application *Application) initialize(ctx context.Context) error {
 	return application.ensureInitialPublication(ctx)
 }
 
-// migrateIPCheckSettings removes retired IPCheck.ing settings while preserving
-// the only value that has an IPSuper equivalent: its valid pass threshold.
-func (application *Application) migrateIPCheckSettings(ctx context.Context) error {
+// migrateRetiredScoringProviderSettings makes IPSuper the sole active scoring
+// provider and removes settings for retired providers.
+func (application *Application) migrateRetiredScoringProviderSettings(ctx context.Context) error {
+	var selected string
+	_ = application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_provider'`).Scan(&selected)
+	if selected != "ipsuper" {
+		var threshold int
+		if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'iplark_threshold'`).Scan(&threshold); err == nil && threshold >= 0 && threshold <= 100 {
+			if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = 'ipsuper_threshold'`, threshold); err != nil {
+				return fmt.Errorf("migrate retired provider threshold: %w", err)
+			}
+		}
+		if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = 'ipsuper' WHERE key = 'scoring_provider'`); err != nil {
+			return fmt.Errorf("migrate selected Scoring Provider: %w", err)
+		}
+	}
 	var threshold int
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipcheck_threshold'`).Scan(&threshold); err == nil && threshold >= 0 && threshold <= 100 {
 		if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = 'ipsuper_threshold'`, threshold); err != nil {
 			return fmt.Errorf("migrate IPSuper threshold: %w", err)
 		}
 	}
-	if _, err := application.database.ExecContext(ctx, `UPDATE settings SET value = 'iplark' WHERE key = 'scoring_provider' AND value = 'ipcheck'`); err != nil {
-		return fmt.Errorf("migrate selected Scoring Provider: %w", err)
-	}
-	if _, err := application.database.ExecContext(ctx, `DELETE FROM settings WHERE key IN ('ipcheck_threshold', 'ipcheck_enabled', 'ipcheck_failure', 'ipcheck_status', 'ipcheck_checked_at')`); err != nil {
-		return fmt.Errorf("remove retired IPCheck settings: %w", err)
+	if _, err := application.database.ExecContext(ctx, `DELETE FROM settings WHERE key IN ('iplark_threshold', 'iplark_enabled', 'iplark_failure', 'iplark_status', 'iplark_checked_at', 'ipcheck_threshold', 'ipcheck_enabled', 'ipcheck_failure', 'ipcheck_status', 'ipcheck_checked_at')`); err != nil {
+		return fmt.Errorf("remove retired scoring provider settings: %w", err)
 	}
 	return nil
 }
@@ -516,9 +514,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 	var input struct {
 		Language                      string    `json:"language"`
 		ScoringProvider               string    `json:"scoringProvider"`
-		IPLarkThreshold               *int      `json:"iplarkThreshold"`
 		IPSuperThreshold              *int      `json:"ipsuperThreshold"`
-		IPLarkEnabled                 *bool     `json:"iplarkEnabled"`
 		IPSuperEnabled                *bool     `json:"ipsuperEnabled"`
 		EvaluationIntervalMinutes     *int      `json:"evaluationIntervalMinutes"`
 		HistoryRetentionDays          *int      `json:"historyRetentionDays"`
@@ -545,8 +541,8 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 			return
 		}
 	}
-	if input.ScoringProvider != "" && input.ScoringProvider != "iplark" && input.ScoringProvider != "ipsuper" {
-		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be iplark or ipsuper"))
+	if input.ScoringProvider != "" && input.ScoringProvider != "ipsuper" {
+		writeError(response, http.StatusBadRequest, errors.New("scoringProvider must be ipsuper"))
 		return
 	}
 	if input.AvailabilityURLs != nil {
@@ -592,7 +588,7 @@ func (application *Application) handlePutSettings(response http.ResponseWriter, 
 		writeError(response, http.StatusBadRequest, errors.New("required availability successes cannot exceed availability attempts"))
 		return
 	}
-	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "iplark_threshold": input.IPLarkThreshold, "ipsuper_threshold": input.IPSuperThreshold, "iplark_enabled": input.IPLarkEnabled, "ipsuper_enabled": input.IPSuperEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_address": input.ListenAddress, "listen_port": input.ListenPort} {
+	for name, value := range map[string]any{"language": input.Language, "scoring_provider": input.ScoringProvider, "ipsuper_threshold": input.IPSuperThreshold, "ipsuper_enabled": input.IPSuperEnabled, "evaluation_interval_minutes": input.EvaluationIntervalMinutes, "history_retention_days": input.HistoryRetentionDays, "availability_attempts": input.AvailabilityAttempts, "availability_required_successes": input.AvailabilityRequiredSuccesses, "availability_timeout_seconds": input.AvailabilityTimeoutSecs, "availability_max_latency_ms": input.AvailabilityMaxLatencyMS, "evaluation_worker_count": input.EvaluationWorkerCount, "scoring_jitter_ms": input.ScoringJitterMS, "score_cache_ttl_minutes": input.ScoreCacheTTLMinutes, "listen_address": input.ListenAddress, "listen_port": input.ListenPort} {
 		if value == nil || value == "" {
 			continue
 		}
@@ -699,9 +695,6 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'scoring_provider'`).Scan(&result.ScoringProvider); err != nil {
 		return result, err
 	}
-	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'iplark_threshold'`).Scan(&result.IPLarkThreshold); err != nil {
-		return result, err
-	}
 	if err := application.database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ipsuper_threshold'`).Scan(&result.IPSuperThreshold); err != nil {
 		return result, err
 	}
@@ -756,10 +749,7 @@ func (application *Application) readSettings(ctx context.Context) (settingsRespo
 }
 
 func (application *Application) readScoringProviderStatuses(ctx context.Context) ([]scoringProviderStatus, error) {
-	providers := []scoringProviderStatus{
-		{Name: "iplark"},
-		{Name: "ipsuper"},
-	}
+	providers := []scoringProviderStatus{{Name: "ipsuper"}}
 	for index := range providers {
 		name := providers[index].Name
 		var enabled string

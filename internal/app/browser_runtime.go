@@ -73,33 +73,6 @@ func (runtime *PlaywrightBrowserRuntime) fetchUntilText(ctx context.Context, pro
 	return nil, lastErr
 }
 
-func (runtime *PlaywrightBrowserRuntime) FetchWithInput(ctx context.Context, proxyEndpoint, identityTarget, searchTarget, input string) ([]BrowserPage, error) {
-	if proxyEndpoint == "" {
-		return nil, fmt.Errorf("%w: Browser Proxy Endpoint is empty", errBrowserRuntimeUnavailable)
-	}
-	if identityTarget == "" || searchTarget == "" || input == "" {
-		return nil, fmt.Errorf("%w: browser search targets are incomplete", errBrowserRuntimeUnavailable)
-	}
-	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
-	if runtime.closed {
-		return nil, fmt.Errorf("%w: runtime is closed", errBrowserRuntimeUnavailable)
-	}
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		pages, err := runtime.fetchWithInputOnce(ctx, proxyEndpoint, identityTarget, searchTarget, input)
-		if err == nil {
-			return pages, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		runtime.resetBrowser()
-	}
-	return nil, lastErr
-}
-
 func (runtime *PlaywrightBrowserRuntime) fetchOnce(ctx context.Context, proxyEndpoint string, targets []string) ([]BrowserPage, error) {
 	return runtime.fetchOnceUntilText(ctx, proxyEndpoint, targets, nil)
 }
@@ -148,7 +121,10 @@ func (runtime *PlaywrightBrowserRuntime) fetchOnceUntilText(ctx context.Context,
 			}
 		}
 		browserPage.Title, _ = page.Title()
-		browserPage.Text, _ = page.TextContent("body")
+		// Use rendered text for provider parsing. TextContent includes hidden
+		// templates and script contents, which can contain unrelated score
+		// examples such as "100/100".
+		browserPage.Text, _ = page.InnerText("body")
 		browserPage.HTML, _ = page.Content()
 		if gotoErr != nil {
 			browserPage.Screenshot, _ = page.Screenshot(playwright.PageScreenshotOptions{Type: screenshotTypePNG()})
@@ -171,93 +147,9 @@ func browserTextWaitExpression(markers []string) string {
 	for _, marker := range markers {
 		quoted = append(quoted, fmt.Sprintf("%q", marker))
 	}
-	return "() => document.body && [" + strings.Join(quoted, ",") + "].some(marker => document.body.innerText.includes(marker))"
-}
-
-func (runtime *PlaywrightBrowserRuntime) fetchWithInputOnce(ctx context.Context, proxyEndpoint, identityTarget, searchTarget, input string) ([]BrowserPage, error) {
-	if err := runtime.ensureStarted(); err != nil {
-		return nil, err
-	}
-
-	proxy := &playwright.Proxy{Server: proxyEndpoint}
-	contextOptions := playwright.BrowserNewContextOptions{
-		Proxy:             proxy,
-		JavaScriptEnabled: boolPtr(true),
-	}
-	browserContext, err := runtime.browser.NewContext(contextOptions)
-	if err != nil {
-		return nil, fmt.Errorf("%w: create Browser Context: %v", errBrowserRuntimeUnavailable, err)
-	}
-	_ = browserContext.AddInitScript(playwright.Script{Content: stringPtr("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")})
-	defer browserContext.Close()
-	timeoutMS := float64(runtime.config.Timeout / time.Millisecond)
-	browserContext.SetDefaultTimeout(timeoutMS)
-	browserContext.SetDefaultNavigationTimeout(timeoutMS)
-
-	pages := make([]BrowserPage, 0, 2)
-	page, err := browserContext.NewPage()
-	if err != nil {
-		return pages, fmt.Errorf("%w: create browser search page: %v", errBrowserRuntimeUnavailable, err)
-	}
-	defer page.Close()
-	identityResponse, identityGotoErr := page.Goto(identityTarget, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: &timeoutMS})
-	if identityGotoErr != nil {
-		captured := BrowserPage{URL: page.URL(), Status: responseStatus(identityResponse), Title: pageTitle(page), Text: pageText(page), HTML: pageHTML(page)}
-		captured.Screenshot, _ = page.Screenshot(playwright.PageScreenshotOptions{Type: screenshotTypePNG()})
-		runtime.saveDiagnostic(identityTarget, captured)
-		return pages, fmt.Errorf("%w: navigate %s: %v", errBrowserRuntimeUnavailable, identityTarget, identityGotoErr)
-	}
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{State: playwright.LoadStateLoad, Timeout: &timeoutMS})
-	_, _ = page.WaitForFunction("document.body && document.body.innerText.trim().length > 0", nil, playwright.PageWaitForFunctionOptions{Timeout: &timeoutMS})
-	pages = append(pages, BrowserPage{URL: page.URL(), Status: responseStatus(identityResponse), Title: pageTitle(page), Text: pageText(page), HTML: pageHTML(page)})
-
-	response, gotoErr := page.Goto(searchTarget, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: &timeoutMS})
-	if gotoErr != nil {
-		captured := BrowserPage{URL: page.URL(), Status: responseStatus(response), Title: pageTitle(page), Text: pageText(page), HTML: pageHTML(page)}
-		captured.Screenshot, _ = page.Screenshot(playwright.PageScreenshotOptions{Type: screenshotTypePNG()})
-		runtime.saveDiagnostic(searchTarget, captured)
-		return pages, fmt.Errorf("%w: navigate %s: %v", errBrowserRuntimeUnavailable, searchTarget, gotoErr)
-	}
-	searchInput := page.Locator("#searchtext")
-	if err := searchInput.Fill(input, playwright.LocatorFillOptions{Force: boolPtr(true)}); err != nil {
-		return pages, fmt.Errorf("%w: fill IPLark search input: %v", errBrowserRuntimeUnavailable, err)
-	}
-	if err := searchInput.Focus(); err != nil {
-		return pages, fmt.Errorf("%w: focus IPLark search input: %v", errBrowserRuntimeUnavailable, err)
-	}
-	if err := page.Keyboard().Press("Enter"); err != nil {
-		return pages, fmt.Errorf("%w: submit IPLark search: %v", errBrowserRuntimeUnavailable, err)
-	}
-	_, _ = page.WaitForFunction("() => document.body && /IP评分|IP Score/.test(document.body.innerText)", nil, playwright.PageWaitForFunctionOptions{Timeout: &timeoutMS})
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{State: playwright.LoadStateLoad, Timeout: &timeoutMS})
-	captured := BrowserPage{URL: page.URL(), Status: responseStatus(response), Title: pageTitle(page), Text: pageText(page), HTML: pageHTML(page)}
-	if captured.URL != searchTarget {
-		captured.Status = responseStatus(response)
-	}
-	pages = append(pages, captured)
-	return pages, nil
-}
-
-func responseStatus(response playwright.Response) int {
-	if response == nil {
-		return 0
-	}
-	return response.Status()
-}
-
-func pageTitle(page playwright.Page) string {
-	title, _ := page.Title()
-	return title
-}
-
-func pageText(page playwright.Page) string {
-	text, _ := page.TextContent("body")
-	return text
-}
-
-func pageHTML(page playwright.Page) string {
-	html, _ := page.Content()
-	return html
+	// IPSuper renders a default 100/100 card while its tasks are still
+	// running. Waiting for the score label alone would capture that placeholder.
+	return "() => { const text = document.body ? document.body.innerText : ''; return [" + strings.Join(quoted, ",") + "].some(marker => text.includes(marker)) && !/\\b[1-9]\\d*\\s+running\\b/i.test(text) && !/[1-9]\\d*\\s*运行中/.test(text); }"
 }
 
 func (runtime *PlaywrightBrowserRuntime) resetBrowser() {
