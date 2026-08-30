@@ -193,3 +193,37 @@ test("Settings and Logs are separate destinations and History is not exposed", a
   expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
   expect(await screen.findByText("Evaluation Run completed")).toBeInTheDocument();
 });
+
+test("Settings saves scoring and runtime diagnostics without exposing an evaluation schedule", async () => {
+  let saved: Record<string, any> | undefined;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings") && init?.method === "PUT") { saved = JSON.parse(String(init.body)); return new Response(null, { status: 204 }); }
+    if (url.endsWith("/api/settings")) return Response.json({ ...settings, ipsuperEnabled: true, browserRuntimeStatus: "available", browserDiagnosticMode: "headless" });
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "设置" }));
+  expect(await screen.findByText("浏览器运行时")).toBeInTheDocument();
+  expect(screen.getByText("headless")).toBeInTheDocument();
+  expect(screen.queryByText("评估间隔")).not.toBeInTheDocument();
+  const threshold = await screen.findByLabelText("IPSuper 合格阈值"); await userEvent.clear(threshold); await userEvent.type(threshold, "80");
+  await userEvent.click(screen.getByRole("button", { name: "保存设置" }));
+  expect(await screen.findByRole("button", { name: "已保存" })).toBeInTheDocument();
+  expect(saved?.ipsuperThreshold).toBe(80);
+  expect(saved?.scoringProvider).toBe("ipsuper");
+  expect(saved?.ipsuperEnabled).toBe(true);
+});
+
+test("Logs displays refresh, node, scoring, publication, Mihomo, and browser-runtime diagnostics", async () => {
+  const logs = ["subscription refresh failed", "Mihomo node evaluation failed", "scoring failed", "publication failed", "browser runtime failed"].map((message) => ({ timestamp: "2026-08-30T10:01:00Z", level: "error", message }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/logs")) return Response.json(logs);
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "日志" }));
+  expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
+  for (const message of logs.map((log) => log.message)) expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: /历史/ })).not.toBeInTheDocument();
+});
