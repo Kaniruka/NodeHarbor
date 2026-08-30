@@ -113,6 +113,43 @@ test("Nodes has one global evaluation control and compact grouped cards", async 
   expect(summary.parentElement).not.toHaveAttribute("open");
 });
 
+test("Nodes starts one global run and disables the control while it is running", async () => {
+  let run = { ...currentRun, status: "completed" };
+  let starts = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([source]);
+    if (url.endsWith("/api/upstream-subscriptions/source-1/nodes")) return Response.json([]);
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json(run);
+    if (url.endsWith("/api/evaluation-runs") && init?.method === "POST") { starts++; run = { ...run, status: "running" }; return Response.json(run, { status: 202 }); }
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
+  const startButtons = await screen.findAllByRole("button", { name: "开始评估" });
+  expect(startButtons).toHaveLength(1);
+  const startButton = startButtons[0];
+  await userEvent.click(startButton);
+  expect(starts).toBe(1);
+  expect(await screen.findByRole("button", { name: "运行中" })).toBeDisabled();
+});
+
+test("Nodes renders failed evaluation and scoring states without presenting a speed score", async () => {
+  const failedRun = { ...currentRun, status: "failed", passed: 0, failed: 1, results: [{ ...currentRun.results[0], state: "failed", ipScore: undefined, reason: "provider_unavailable: fixture provider outage", stages: { availability: { status: "passed" }, ipScore: { status: "unavailable", reason: "fixture provider outage" } } }] };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/settings")) return Response.json(settings);
+    if (url.endsWith("/api/upstream-subscriptions")) return Response.json([source]);
+    if (url.endsWith("/api/upstream-subscriptions/source-1/nodes")) return Response.json([]);
+    if (url.endsWith("/api/evaluation-runs/current")) return Response.json(failedRun);
+    throw new Error(`unexpected request: ${url}`);
+  });
+  render(<App />); await userEvent.click(await screen.findByRole("link", { name: "节点" }));
+  expect(await screen.findByText("provider_unavailable: fixture provider outage")).toBeInTheDocument();
+  expect(screen.getByText("IP Score").parentElement?.parentElement).toHaveTextContent("—");
+  expect(screen.queryByText("速度评分")).not.toBeInTheDocument();
+});
+
 test("Publish shows only the atomic publication snapshot using the same grouping", async () => {
   mockAPI(); render(<App />); await userEvent.click(await screen.findByRole("link", { name: "发布" }));
   expect(await screen.findByRole("heading", { name: "发布" })).toBeInTheDocument();
