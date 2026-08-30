@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Push-Location $projectRoot
-try { go build -o (Join-Path $stage 'nodeharbor.exe') ./cmd/nodeharbor }
+try { go build -ldflags "-X main.version=$Version" -o (Join-Path $stage 'nodeharbor.exe') ./cmd/nodeharbor }
 finally { Pop-Location }
 Copy-Item -LiteralPath $core -Destination (Join-Path $stage 'nodeharbor-core.exe')
 Copy-Item -LiteralPath $browserRuntime -Destination (Join-Path $stage 'browser-runtime') -Recurse

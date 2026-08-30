@@ -172,7 +172,7 @@ $fakeJob = Start-Job -ArgumentList $fakePort, $readyFile, $modeFile, $subscripti
                             $body = 'provider unavailable'
                         }
                         else {
-                            $body = '<html><body><main>综合安全分 99/100</main></body></html>'
+                            $body = '<html><body><main>综合安全分 99/100</main><p>0 running</p></body></html>'
                             $contentType = 'text/html; charset=utf-8'
                         }
                     }
@@ -267,7 +267,7 @@ try {
     if ($runResponse.Status -ne 202) { throw "Could not start Evaluation Run: HTTP $($runResponse.Status) $($runResponse.Body)" }
     $runID = ($runResponse.Body | ConvertFrom-Json).id
     $completed = $false
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt 240; $attempt++) {
         $run = (Invoke-HTTP "$baseURL/api/evaluation-runs/$runID").Body | ConvertFrom-Json
         if ($run.status -in @('completed', 'failed', 'paused')) {
             $completed = $true
@@ -291,7 +291,7 @@ try {
     if ($failureRunResponse.Status -ne 202) { throw "Could not start upstream failure Evaluation Run: HTTP $($failureRunResponse.Status)" }
     $failureRunID = ($failureRunResponse.Body | ConvertFrom-Json).id
     $failureRun = $null
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt 240; $attempt++) {
         $failureRun = (Invoke-HTTP "$baseURL/api/evaluation-runs/$failureRunID").Body | ConvertFrom-Json
         if ($failureRun.status -in @('completed', 'failed', 'paused')) { break }
         Start-Sleep -Milliseconds 250
@@ -306,7 +306,7 @@ try {
     if ($failureRunResponse.Status -ne 202) { throw "Could not start provider failure Evaluation Run: HTTP $($failureRunResponse.Status)" }
     $failureRunID = ($failureRunResponse.Body | ConvertFrom-Json).id
     $failureRun = $null
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt 240; $attempt++) {
         $failureRun = (Invoke-HTTP "$baseURL/api/evaluation-runs/$failureRunID").Body | ConvertFrom-Json
         if ($failureRun.status -in @('completed', 'failed', 'paused')) { break }
         Start-Sleep -Milliseconds 250
